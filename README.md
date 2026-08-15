@@ -1,0 +1,180 @@
+# Instagram → Telegram reposter
+
+Paste an Instagram link into a Telegram chat with this bot. It downloads the post,
+burns a watermark into the video or photos, and posts it to your channel — then sends
+you the confirmation with a **❌ Delete from channel** button in case you change your mind.
+
+Carousels work: a 7-photo post goes out as one album.
+
+---
+
+## Setup — about 10 minutes
+
+### 1. Make the bot
+
+In Telegram, message **[@BotFather](https://t.me/BotFather)** → `/newbot` → pick a name and a
+username. It replies with a token like `8123456789:AAH...`. That's `BOT_TOKEN`.
+
+### 2. Let it post to your channel
+
+Open your channel → **Manage channel** → **Administrators** → **Add admin** → search your
+bot's username → grant **Post messages** (the rest can stay off) → save.
+
+If your channel is public, `CHANNEL_ID` is `@yourchannelname`. If it's private, forward any
+message from the channel to [@userinfobot](https://t.me/userinfobot) and use the `-100…`
+number it gives you.
+
+### 3. Find your own id
+
+Start a chat with your new bot and send `/whoami`. It replies with your numeric id — that's
+`ADMIN_IDS`. This command deliberately works before you're an admin, because otherwise you'd
+need the number to get the number.
+
+### 4. Fill in the config
+
+```bash
+cp .env.example .env
+# then edit .env — BOT_TOKEN, CHANNEL_ID and ADMIN_IDS are the only required ones
+```
+
+### 5. Check it before you run it
+
+```bash
+npm install
+npm run doctor
+```
+
+`doctor` verifies the token, that the bot can actually see the channel, that ffmpeg and
+yt-dlp are present, and that the watermark font and logo exist. It's much faster than
+finding out from a failed post.
+
+### 6. Run it
+
+```bash
+docker compose up -d --build     # recommended
+# or, with ffmpeg + yt-dlp already installed locally:
+npm start
+```
+
+Paste a reel link. It should post within a few seconds.
+
+---
+
+## Where to run it
+
+It long-polls by default, so it needs **no public URL and no open ports** — anywhere that
+stays on will do.
+
+| Option | Cost | Honest verdict |
+|---|---|---|
+| **A machine you already own** | free | Easiest by far. Spare laptop, old PC, Raspberry Pi, home server. `docker compose up -d`. Only posts while that machine is on. |
+| **Oracle Cloud Always Free** | free forever | The only genuinely free always-on VM left. 2 ARM cores / 12GB. Needs a card for ID verification, and setup is a real sit-down-at-a-computer job, not a phone task. See the caveat below. |
+| **Any small VPS** | ~$4/mo | Hetzner, Vultr, DigitalOcean. Zero drama, works the first time. |
+| **Cloud Run / Render** | free tier | Needs `MODE=webhook`. Both sleep when idle, so the first link after a quiet spell takes ~1 minute. Cloud Run's filesystem is *in memory* — give it 2GB or video downloads will hit the memory ceiling. |
+
+**The Oracle caveat, because it will bite otherwise:** Oracle reclaims idle Always Free ARM
+instances when CPU, network *and* memory all sit below 20% across a 7-day window. A bot that
+waits quietly between reels is exactly that profile. Oracle emails a warning first, and any
+other small workload on the box avoids it — but don't put this somewhere and assume it's
+permanent without watching for that email.
+
+Fly.io, Railway and Hugging Face Spaces no longer have a free tier that fits this. Render's
+free plan has no background workers, only web services, which is why it needs webhook mode.
+
+---
+
+## Watermarks
+
+Set `WATERMARK_MODE` in `.env`:
+
+| Mode | What you get |
+|---|---|
+| `text` | `WATERMARK_TEXT` in a corner, white with a dark outline so it reads on any footage. Needs no assets. |
+| `logo` | Your PNG from `assets/watermark.png` in a corner. |
+| `both` | Logo in one corner, text in the opposite one. |
+| `tiled` | Text repeated across the whole frame. Near-impossible to crop out. |
+| `none` | Repost untouched. |
+
+Everything else is tunable: `WATERMARK_POSITION` (`tl` `tr` `bl` `br` `center`),
+`WATERMARK_OPACITY`, `WATERMARK_SCALE` (logo width as a share of the video width),
+`WATERMARK_TEXT_SCALE`, and `WATERMARK_MARGIN`.
+
+To use a logo, drop a **transparent PNG** at `assets/watermark.png` and set
+`WATERMARK_MODE=logo`. The folder is mounted into the container, so swapping the file and
+restarting is enough — no rebuild.
+
+---
+
+## When Instagram starts asking for a login
+
+Instagram rate-limits anonymous downloads hard, and the bot will tell you when that's what
+happened. Cookies from a logged-in account raise the ceiling enormously.
+
+1. Use a **burner Instagram account**, not your real one. Heavy automated fetching is what
+   gets accounts action-blocked, and the block lands on whichever account's cookies you used.
+2. Log into that account in a browser and export cookies with any "Get cookies.txt"
+   extension, in **Netscape format**.
+3. Save it as `cookies/instagram.txt`, then set `COOKIES_FILE=/app/cookies/instagram.txt`
+   in `.env` and restart.
+
+Cookies expire every few weeks. When they do, the bot says *"The saved Instagram cookies have
+expired"* rather than leaving you guessing.
+
+---
+
+## Troubleshooting
+
+**"Not authorised. Your id is 12345"** — put that number in `ADMIN_IDS` and restart.
+
+**Nothing happens when I paste a link** — check the logs (`docker compose logs -f`). If it
+says it can't see the channel, the bot isn't an admin there yet.
+
+**Downloads suddenly stopped working** — Instagram changes things every few weeks and yt-dlp
+catches up within days. Set `YTDLP_AUTO_UPDATE=true` and restart, or rebuild the image. The
+bot also falls back to a second downloader (gallery-dl) automatically, which usually covers
+the gap.
+
+**Video arrives as a grey file instead of playing** — that means the width/height/duration
+metadata didn't reach Telegram. Check ffprobe is installed (`npm run doctor`).
+
+**"That video is 54MB…"** — Telegram caps bot uploads at 50MB and there's no way around it
+short of running your own Bot API server. The bot already tries a smaller re-encode first.
+
+**`/status`** — shows the queue, uptime, and what watermark settings are actually live.
+
+---
+
+## How it works
+
+```
+message → admin check → link found → queue (one job at a time)
+   → yt-dlp download  (falls back to gallery-dl if that fails)
+   → ffmpeg watermark (falls back to posting the original if that fails)
+   → size check       (re-encodes smaller if over Telegram's 50MB ceiling)
+   → post to channel  → remember message ids → ❌ Delete button
+```
+
+The queue is deliberately serial — ffmpeg will happily eat every core, and two links pasted
+back to back shouldn't fight each other on a small box. The second one just says how many are
+ahead of it.
+
+Failures degrade instead of stopping: a watermark that won't render still posts the clip, and
+tells you it went out unwatermarked rather than pretending it worked.
+
+### Layout
+
+| File | Does |
+|---|---|
+| `src/index.js` | Bot wiring, commands, the job pipeline |
+| `src/instagram.js` | Link detection, yt-dlp + gallery-dl, captions, error translation |
+| `src/watermark.js` | ffmpeg filter graphs, the size-limit shrink pass |
+| `src/poster.js` | Sending to the channel, albums, deletion |
+| `src/queue.js` | Serial job queue |
+| `src/store.js` | Remembers posted message ids so Delete survives a restart |
+| `src/config.js` | Env parsing — every invalid value fails at boot with a readable reason |
+| `scripts/doctor.js` | Pre-flight check |
+
+```bash
+npm test    # 60 tests; the ffmpeg ones build real media and run the real filter graphs
+npm run doctor
+```

@@ -1,0 +1,22 @@
+services:
+  bot:
+    build: .
+    image: insta-repost-bot
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      # Only needed for the health check and for webhook mode. Safe to remove
+      # if you are running polling mode on a machine you do not expose.
+      - "${PORT:-8080}:8080"
+    volumes:
+      # Survives restarts so the ❌ Delete button keeps working.
+      - ./data:/app/data
+      # Swap the watermark logo without rebuilding the image.
+      - ./assets:/app/assets:ro
+      # Optional: drop instagram.txt in here and set COOKIES_FILE.
+      - ./cookies:/app/cookies:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
