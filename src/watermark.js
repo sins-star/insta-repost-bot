@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { run, probe } from './media.js';
+import { detectWatermark } from './detect.js';
 import { log } from './logger.js';
 
 /**
@@ -80,12 +81,18 @@ function drawtext({ fontPath, textFilePath, fontSize, opacity, x, y }) {
   ].join('');
 }
 
+const even = (n) => Math.max(2, Math.round(n) & ~1);
+
 /**
  * Build the -filter_complex string for one piece of media.
  *
  * Pure and dimension-driven: sizes are resolved to pixels here from the real
  * frame size rather than left as ffmpeg expressions, which keeps the graph
  * readable in logs and lets the tests assert on exact output.
+ *
+ * The graph is assembled as a list of chains because two features can each need
+ * the logo input, and an ffmpeg filter output may only be consumed once — so
+ * the logo has to be explicitly split when it is used twice.
  *
  * Returns null when there is nothing to draw, which callers use to skip
  * re-encoding entirely.
@@ -103,13 +110,78 @@ export function buildFilterGraph({
   textFilePath,
   width,
   height,
+  /** {x,y,w,h} of an existing watermark to blur out, or null. */
+  cover = null,
+  /** Stamp our logo on top of the blurred patch. */
+  coverLogo = false,
+  /** Knock a solid background colour out of the logo, e.g. '0x000000'. */
+  chromaKey = '',
+  blurStrength = 0.16,
 }) {
-  if (mode === 'none') return null;
+  const hasCover = Boolean(cover);
+  if (mode === 'none' && !hasCover) return null;
   if (!width || !height) throw new Error('buildFilterGraph needs the real frame width and height');
 
   const marginPx = Math.round(width * margin);
   const fontSize = Math.max(10, Math.round(Math.min(width, height) * textScale));
   const opacityStr = Number(opacity).toFixed(3);
+
+  const cornerUsesLogo = ['logo', 'both'].includes(mode);
+  const patchUsesLogo = hasCover && coverLogo;
+  const logoUses = (cornerUsesLogo ? 1 : 0) + (patchUsesLogo ? 1 : 0);
+
+  const chains = [];
+  let current = '0:v';
+
+  // ── logo input preparation ────────────────────────────────────────────────
+  let logoSource = '1:v';
+  let cornerLogoLabel = null;
+  let patchLogoLabel = null;
+
+  if (logoUses > 0) {
+    if (chromaKey) {
+      chains.push(`[${logoSource}]colorkey=${chromaKey}:0.12:0.06[logokey]`);
+      logoSource = 'logokey';
+    }
+    if (logoUses === 2) {
+      chains.push(`[${logoSource}]split=2[logoa][logob]`);
+      patchLogoLabel = 'logoa';
+      cornerLogoLabel = 'logob';
+    } else if (patchUsesLogo) {
+      patchLogoLabel = logoSource;
+    } else {
+      cornerLogoLabel = logoSource;
+    }
+  }
+
+  // ── cover an existing watermark ───────────────────────────────────────────
+  if (hasCover) {
+    const { x, y, w, h } = cover;
+    // Radius scales with the patch so a small logo is not over-blurred into a
+    // grey smear and a large one is actually obliterated.
+    const radius = Math.max(2, Math.min(Math.floor(Math.min(w, h) / 2) - 1, Math.round(Math.min(w, h) * blurStrength)));
+
+    chains.push(`[${current}]split=2[covbase][covsrc]`);
+    chains.push(`[covsrc]crop=${w}:${h}:${x}:${y},boxblur=${radius}:2[covblur]`);
+    chains.push(`[covbase][covblur]overlay=${x}:${y}[covout]`);
+    current = 'covout';
+
+    if (patchLogoLabel) {
+      const patchLogoWidth = even(w * 0.9);
+      chains.push(`[${patchLogoLabel}]scale=${patchLogoWidth}:-1[covlogo]`);
+      // `${w}` is this region's width in pixels; bare `w`/`h` are ffmpeg's
+      // overlay-input dimensions. Mixing them centres the logo on the patch
+      // without needing to know the logo's aspect ratio here.
+      chains.push(`[${current}][covlogo]overlay=${x}+(${w}-w)/2:${y}+(${h}-h)/2[covlogoout]`);
+      current = 'covlogoout';
+    }
+  }
+
+  // ── the corner watermark ──────────────────────────────────────────────────
+  if (mode === 'none') {
+    chains.push(`[${current}]null[v]`);
+    return chains.join(';');
+  }
 
   if (mode === 'tiled') {
     const cells = [];
@@ -127,35 +199,43 @@ export function buildFilterGraph({
         );
       }
     }
-    return `[0:v]${cells.join(',')}[v]`;
+    chains.push(`[${current}]${cells.join(',')}[v]`);
+    return chains.join(';');
   }
 
   if (mode === 'text') {
     const { x, y } = textPosition(position, marginPx);
-    return `[0:v]${drawtext({ fontPath, textFilePath, fontSize, opacity: opacityStr, x, y })}[v]`;
+    chains.push(
+      `[${current}]${drawtext({ fontPath, textFilePath, fontSize, opacity: opacityStr, x, y })}[v]`,
+    );
+    return chains.join(';');
   }
 
-  const logoWidth = Math.max(1, Math.round(width * scale));
-  const { x, y } = overlayPosition(position, marginPx);
-  const logoChain =
-    `[1:v]scale=${logoWidth}:-1,format=rgba,` +
-    `colorchannelmixer=aa=${opacityStr}[wm]`;
+  if (mode === 'logo' || mode === 'both') {
+    const logoWidth = Math.max(1, Math.round(width * scale));
+    const { x, y } = overlayPosition(position, marginPx);
+    chains.push(
+      `[${cornerLogoLabel}]scale=${logoWidth}:-1,format=rgba,colorchannelmixer=aa=${opacityStr}[wm]`,
+    );
 
-  if (mode === 'logo') {
-    return `${logoChain};[0:v][wm]overlay=${x}:${y}[v]`;
-  }
+    if (mode === 'logo') {
+      chains.push(`[${current}][wm]overlay=${x}:${y}[v]`);
+      return chains.join(';');
+    }
 
-  if (mode === 'both') {
     const textCorner = textPosition(oppositeCorner(position), marginPx);
-    const text = drawtext({
-      fontPath,
-      textFilePath,
-      fontSize,
-      opacity: opacityStr,
-      x: textCorner.x,
-      y: textCorner.y,
-    });
-    return `${logoChain};[0:v][wm]overlay=${x}:${y}[base];[base]${text}[v]`;
+    chains.push(`[${current}][wm]overlay=${x}:${y}[base]`);
+    chains.push(
+      `[base]${drawtext({
+        fontPath,
+        textFilePath,
+        fontSize,
+        opacity: opacityStr,
+        x: textCorner.x,
+        y: textCorner.y,
+      })}[v]`,
+    );
+    return chains.join(';');
   }
 
   throw new Error(`unknown watermark mode "${mode}"`);
@@ -227,7 +307,7 @@ async function writeTextFile(dir, text) {
  */
 export async function applyWatermark(item, config, workDir) {
   const wm = config.watermark;
-  if (wm.mode === 'none') return { path: item.path, watermarked: false };
+  const isVideo = item.type === 'video';
 
   let info;
   try {
@@ -240,6 +320,15 @@ export async function applyWatermark(item, config, workDir) {
     log.warn('watermark: could not read dimensions, posting original', item.path);
     return { path: item.path, watermarked: false, reason: 'no-dimensions' };
   }
+
+  // Detection is temporal — it needs frames to compare, so it can only run on
+  // video. A still image gives no signal to work with.
+  let cover = null;
+  if (config.cover.enabled && isVideo) {
+    cover = await detectWatermark(item.path, config, workDir);
+  }
+
+  if (wm.mode === 'none' && !cover) return { path: item.path, watermarked: false, info };
 
   const textFilePath = wm.text ? await writeTextFile(workDir, wm.text) : '';
   const filter = buildFilterGraph({
@@ -255,11 +344,15 @@ export async function applyWatermark(item, config, workDir) {
     textFilePath,
     width: info.width,
     height: info.height,
+    cover,
+    coverLogo: config.cover.useLogo && Boolean(wm.logoPath),
+    chromaKey: wm.chromaKey,
+    blurStrength: config.cover.blurStrength,
   });
-  if (!filter) return { path: item.path, watermarked: false };
+  if (!filter) return { path: item.path, watermarked: false, info };
 
-  const needsLogo = ['logo', 'both'].includes(wm.mode);
-  const isVideo = item.type === 'video';
+  const needsLogo =
+    ['logo', 'both'].includes(wm.mode) || (cover && config.cover.useLogo && Boolean(wm.logoPath));
   const outPath = path.join(
     workDir,
     `wm-${path.basename(item.path, path.extname(item.path))}.${isVideo ? 'mp4' : 'jpg'}`,
@@ -273,20 +366,13 @@ export async function applyWatermark(item, config, workDir) {
     // Audio is copied rather than re-encoded: the filter graph never touches it,
     // and Instagram audio is already AAC. `?` makes a silent clip not an error.
     args.push(
-      '-map',
-      '0:a?',
-      '-c:a',
-      'copy',
-      '-c:v',
-      'libx264',
-      '-preset',
-      'veryfast',
-      '-crf',
-      '23',
-      '-pix_fmt',
-      'yuv420p',
-      '-movflags',
-      '+faststart',
+      '-map', '0:a?',
+      '-c:a', 'copy',
+      '-c:v', 'libx264',
+      '-preset', 'veryfast',
+      '-crf', '23',
+      '-pix_fmt', 'yuv420p',
+      '-movflags', '+faststart',
     );
   } else {
     args.push('-frames:v', '1', '-q:v', '2');
@@ -295,18 +381,18 @@ export async function applyWatermark(item, config, workDir) {
 
   try {
     await run(config.ffmpegPath, args, { timeoutMs: config.encodeTimeoutMs });
-    return { path: outPath, watermarked: true, info };
+    return { path: outPath, watermarked: true, info, cover };
   } catch (err) {
     // The one failure worth a second attempt: a container whose audio codec
     // cannot be copied into mp4. Re-encoding audio fixes it and costs seconds.
     if (isVideo) {
       log.warn('watermark: stream copy failed, retrying with re-encoded audio —', err.message);
       try {
-        const retry = args.map((a) => a);
+        const retry = [...args];
         const codecIndex = retry.indexOf('copy');
         if (codecIndex !== -1) retry.splice(codecIndex, 1, 'aac', '-b:a', '128k');
         await run(config.ffmpegPath, retry, { timeoutMs: config.encodeTimeoutMs });
-        return { path: outPath, watermarked: true, info };
+        return { path: outPath, watermarked: true, info, cover };
       } catch (retryErr) {
         log.error('watermark failed twice, posting original —', retryErr.stderr || retryErr.message);
         return { path: item.path, watermarked: false, reason: 'ffmpeg-failed', info };

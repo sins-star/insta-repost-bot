@@ -118,6 +118,15 @@ export function loadConfig(source = process.env) {
         margin: num('WATERMARK_MARGIN', 0.03, { min: 0, max: 0.45 }),
         tileRows: num('WATERMARK_TILE_ROWS', 3, { min: 1, max: 10 }),
         tileCols: num('WATERMARK_TILE_COLS', 3, { min: 1, max: 10 }),
+        // Knocks a solid backdrop out of a logo that has no alpha channel —
+        // otherwise a logo saved on black lands as a black box on the video.
+        chromaKey: str('WATERMARK_CHROMA_KEY', ''),
+      },
+
+      cover: {
+        enabled: bool('COVER_EXISTING', true),
+        useLogo: bool('COVER_WITH_LOGO', true),
+        blurStrength: num('COVER_BLUR', 0.16, { min: 0.02, max: 0.5 }),
       },
 
       caption: {
@@ -164,6 +173,16 @@ export function loadConfig(source = process.env) {
     }
     if (config.cookiesFile && !fs.existsSync(config.cookiesFile)) {
       throw new ConfigError(`COOKIES_FILE is set but ${config.cookiesFile} does not exist`);
+    }
+
+    // Stamping the logo over a covered watermark wants the same file the corner
+    // mark uses — but unlike the corner mark this one degrades. Covering still
+    // works without a logo (the blur is what actually hides the old mark), so a
+    // missing file drops to blur-only rather than refusing to start. Drop the
+    // PNG in later and it upgrades itself on the next restart.
+    if (config.cover.enabled && config.cover.useLogo && !fs.existsSync(config.watermark.logoPath)) {
+      config.cover.useLogo = false;
+      config.cover.logoMissing = true;
     }
 
     return config;

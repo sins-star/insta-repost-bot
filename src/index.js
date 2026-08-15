@@ -70,6 +70,13 @@ async function main() {
     }
   }
 
+  if (config.cover.logoMissing) {
+    log.warn(
+      `cover: ${config.watermark.logoPath} not found — covering an existing watermark ` +
+        'will blur it out but not stamp the logo. Add the file and restart to enable that.',
+    );
+  }
+
   const store = new PostStore(config.dataDir);
   await store.load();
   const queue = new Queue({ limit: config.queueLimit });
@@ -131,6 +138,11 @@ async function main() {
         `Channel: ${config.channelId}`,
         `Queue: ${queue.size} waiting · ${queue.completed} posted · ${queue.failed} failed`,
         `Watermark: ${detail}`,
+        `Cover existing: ${
+          config.cover.enabled
+            ? `on (${config.cover.useLogo ? 'blur + logo' : 'blur only'})`
+            : 'off'
+        }`,
         `Cookies: ${config.cookiesFile ? 'configured' : 'none'}`,
       ].join('\n'),
     );
@@ -178,9 +190,11 @@ async function main() {
       const finished = [];
       let unwatermarked = 0;
       let shrunk = 0;
+      let covered = 0;
       for (const item of result.items) {
         const out = await applyWatermark(item, config, workDir);
         if (!out.watermarked && config.watermark.mode !== 'none') unwatermarked += 1;
+        if (out.cover) covered += 1;
 
         const fitted = await ensureUnderLimit(out.path, config, workDir);
         if (fitted.shrunk) shrunk += 1;
@@ -205,6 +219,12 @@ async function main() {
       });
 
       const notes = [];
+      // Detection is a guess and it is not confirmed with you before posting, so
+      // it always says when it acted — a wrong guess should be visible here
+      // rather than discovered on the channel later.
+      if (covered) {
+        notes.push(`🛡 Covered an existing watermark on ${covered} item(s).`);
+      }
       if (unwatermarked) {
         notes.push(`⚠️ ${unwatermarked} item(s) posted WITHOUT a watermark — check the logs.`);
       }

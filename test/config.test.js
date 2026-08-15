@@ -62,6 +62,19 @@ test('watermark none needs neither text nor logo', () => {
   assert.equal(loadConfig(env).watermark.mode, 'none');
 });
 
+test('a missing logo downgrades covering instead of blocking startup', () => {
+  // Covering still works without a logo — the blur is what hides the old mark —
+  // so this must not be a boot failure the way a logo corner watermark is.
+  const config = loadConfig({ ...valid, COVER_EXISTING: 'true', COVER_WITH_LOGO: 'true' });
+  assert.equal(config.cover.enabled, true);
+  assert.equal(config.cover.useLogo, false);
+  assert.equal(config.cover.logoMissing, true);
+});
+
+test('covering can be switched off entirely', () => {
+  assert.equal(loadConfig({ ...valid, COVER_EXISTING: 'false' }).cover.enabled, false);
+});
+
 test('webhook mode without a URL is refused', () => {
   assert.throws(() => loadConfig({ ...valid, MODE: 'webhook' }), /requires WEBHOOK_URL/);
 });

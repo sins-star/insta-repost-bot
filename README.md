@@ -103,6 +103,38 @@ To use a logo, drop a **transparent PNG** at `assets/watermark.png` and set
 `WATERMARK_MODE=logo`. The folder is mounted into the container, so swapping the file and
 restarting is enough — no rebuild.
 
+If your logo has **no transparency** — an emblem exported on a solid black square, say — it
+would land on the video as a black box. Set `WATERMARK_CHROMA_KEY=0x000000` (or whatever the
+background colour is) and that backdrop gets knocked out at render time.
+
+---
+
+## Covering the original uploader's watermark
+
+On by default. Before watermarking, the bot looks for a burned-in watermark from whoever
+posted it — a TikTok handle, an `@username`, a channel bug — blurs that patch, and stamps your
+logo over it.
+
+**How it finds one.** A watermark is the part of the frame that never changes while everything
+else does. That alone isn't enough: an empty patch of sky is just as still. So it also has to
+have *detail* — edges, lettering, contrast — and be small, and sit near an edge. All four
+together is what a watermark looks like and ordinary footage doesn't.
+
+**⚠️ It is a guess, and nothing asks you before posting.** It will miss some, and it can
+occasionally blur something that was genuinely part of the video. Two things make that
+survivable:
+
+- Every post it acts on says **"🛡 Covered an existing watermark on N item(s)"** in the
+  confirmation. If you didn't expect that line, look at the post.
+- The ❌ Delete button is right underneath it.
+
+When it isn't sure it does nothing, which is deliberate — covering the wrong part of somebody's
+video is worse than leaving their watermark up. Video only: a single photo gives it no frames
+to compare.
+
+Turn it off with `COVER_EXISTING=false`. Blur without stamping the logo with
+`COVER_WITH_LOGO=false`.
+
 ---
 
 ## When Instagram starts asking for a login
@@ -149,7 +181,9 @@ short of running your own Bot API server. The bot already tries a smaller re-enc
 ```
 message → admin check → link found → queue (one job at a time)
    → yt-dlp download  (falls back to gallery-dl if that fails)
-   → ffmpeg watermark (falls back to posting the original if that fails)
+   → detect existing watermark (video only; does nothing unless confident)
+   → ffmpeg: blur that patch, stamp our logo on it, add the corner mark
+             (falls back to posting the original if that fails)
    → size check       (re-encodes smaller if over Telegram's 50MB ceiling)
    → post to channel  → remember message ids → ❌ Delete button
 ```
@@ -167,7 +201,8 @@ tells you it went out unwatermarked rather than pretending it worked.
 |---|---|
 | `src/index.js` | Bot wiring, commands, the job pipeline |
 | `src/instagram.js` | Link detection, yt-dlp + gallery-dl, captions, error translation |
-| `src/watermark.js` | ffmpeg filter graphs, the size-limit shrink pass |
+| `src/detect.js` | Finds an existing burned-in watermark, or honestly returns nothing |
+| `src/watermark.js` | ffmpeg filter graphs, covering, the size-limit shrink pass |
 | `src/poster.js` | Sending to the channel, albums, deletion |
 | `src/queue.js` | Serial job queue |
 | `src/store.js` | Remembers posted message ids so Delete survives a restart |
@@ -175,6 +210,6 @@ tells you it went out unwatermarked rather than pretending it worked.
 | `scripts/doctor.js` | Pre-flight check |
 
 ```bash
-npm test    # 60 tests; the ffmpeg ones build real media and run the real filter graphs
+npm test    # 74 tests; the ffmpeg ones build real media and run the real filter graphs
 npm run doctor
 ```

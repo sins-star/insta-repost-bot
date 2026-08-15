@@ -87,6 +87,76 @@ test('paths are escaped so the filtergraph parser keeps them whole', () => {
   assert.equal(escapeFilterPath('a\\b'), 'a\\\\b');
 });
 
+const region = { x: 800, y: 1600, w: 200, h: 100 };
+
+test('covering blurs the detected region back over the frame', () => {
+  const graph = buildFilterGraph({ ...base, mode: 'none', cover: region });
+  assert.match(graph, /crop=200:100:800:1600/);
+  assert.match(graph, /boxblur=/);
+  assert.match(graph, /\[covbase\]\[covblur\]overlay=800:1600/);
+  // mode none still has to terminate at [v] so ffmpeg has something to map
+  assert.match(graph, /\[v\]$/);
+});
+
+test('mode none with nothing to cover skips encoding entirely', () => {
+  assert.equal(buildFilterGraph({ ...base, mode: 'none', cover: null }), null);
+});
+
+test('the cover logo is centred on the region it hides', () => {
+  const graph = buildFilterGraph({ ...base, mode: 'none', cover: region, coverLogo: true });
+  // 200 * 0.9 = 180
+  assert.match(graph, /\[covlogo\]/);
+  assert.match(graph, /scale=180:-1/);
+  assert.match(graph, /overlay=800\+\(200-w\)\/2:1600\+\(100-h\)\/2/);
+});
+
+test('the logo input is split when both the corner and the patch need it', () => {
+  const graph = buildFilterGraph({ ...base, mode: 'logo', cover: region, coverLogo: true });
+  // An ffmpeg filter output can only be consumed once; without the split this
+  // graph is rejected outright.
+  assert.match(graph, /\[1:v\]split=2\[logoa\]\[logob\]/);
+});
+
+test('the logo input is not split when only one consumer needs it', () => {
+  const cornerOnly = buildFilterGraph({ ...base, mode: 'logo', cover: null });
+  assert.doesNotMatch(cornerOnly, /split=2\[logoa\]/);
+
+  const patchOnly = buildFilterGraph({ ...base, mode: 'text', cover: region, coverLogo: true });
+  assert.doesNotMatch(patchOnly, /split=2\[logoa\]/);
+});
+
+test('covering composes with a text corner mark', () => {
+  const graph = buildFilterGraph({ ...base, mode: 'text', cover: region });
+  assert.match(graph, /boxblur=/);
+  assert.match(graph, /drawtext=/);
+  assert.match(graph, /\[covout\]drawtext/);
+});
+
+test('a chroma key is applied to the logo before it is split', () => {
+  const graph = buildFilterGraph({
+    ...base,
+    mode: 'logo',
+    cover: region,
+    coverLogo: true,
+    chromaKey: '0x000000',
+  });
+  assert.match(graph, /\[1:v\]colorkey=0x000000/);
+  assert.match(graph, /\[logokey\]split=2/);
+});
+
+test('blur radius never exceeds what the patch can support', () => {
+  // boxblur rejects a radius wider than half the plane it is blurring.
+  const tiny = buildFilterGraph({
+    ...base,
+    mode: 'none',
+    cover: { x: 0, y: 0, w: 6, h: 6 },
+    blurStrength: 0.5,
+  });
+  const radius = Number(tiny.match(/boxblur=(\d+):/)[1]);
+  assert.ok(radius <= 2, `radius ${radius} would be rejected by boxblur`);
+  assert.ok(radius >= 2);
+});
+
 test('margin is measured against width, consistently', () => {
   const graph = buildFilterGraph({ ...base, mode: 'logo', margin: 0.05 });
   // 1080 * 0.05 = 54
