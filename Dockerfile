@@ -46,6 +46,13 @@ RUN useradd --create-home --uid 10001 bot \
     && chown -R bot:bot /app /tmp/insta-repost
 USER bot
 
+# Both of these exist so the bot can update its own downloader while running as
+# a non-root user. Docker does not set HOME from /etc/passwd, and without it
+# `pip install --user` has nowhere to write; the PATH entry is what makes the
+# upgraded yt-dlp win over the one baked into the image at build time.
+ENV HOME=/home/bot \
+    PATH="/home/bot/.local/bin:${PATH}"
+
 EXPOSE 8080
 
 HEALTHCHECK --interval=60s --timeout=5s --start-period=20s --retries=3 \

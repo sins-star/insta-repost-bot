@@ -5,6 +5,44 @@ import { log } from './logger.js';
 /** Telegram accepts at most 10 items in one album. */
 export const ALBUM_LIMIT = 10;
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Retry the transient Telegram failures.
+ *
+ * Two of these are routine rather than exceptional and neither means the post
+ * is wrong: 429 is Telegram's flood limit, which arrives with a `retry_after`
+ * telling you exactly how long to wait, and a 5xx or a dropped connection is
+ * Telegram having a moment. Without this, either one loses a post that would
+ * have succeeded seconds later — and on an unattended bot that looks like a bug.
+ *
+ * A 400 is NOT retried: that means the request itself is wrong, and repeating
+ * it just wastes time.
+ */
+export async function withRetry(fn, { attempts = 4, label = 'telegram', baseDelayMs = 1000 } = {}) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await fn();
+    } catch (err) {
+      const code = err.error_code;
+      const retryAfter = err.parameters?.retry_after;
+      const transient =
+        code === 429 || (code >= 500 && code < 600) || err.name === 'HttpError' || !code;
+
+      if (!transient || attempt >= attempts - 1) throw err;
+
+      const waitMs = retryAfter
+        ? (retryAfter + 1) * baseDelayMs
+        : Math.min(30 * baseDelayMs, 2 ** attempt * baseDelayMs);
+      log.warn(
+        `${label}: ${err.description || err.message} — retrying in ${Math.round(waitMs / 1000)}s ` +
+          `(attempt ${attempt + 2}/${attempts})`,
+      );
+      await sleep(waitMs);
+    }
+  }
+}
+
 export function chunk(items, size = ALBUM_LIMIT) {
   const out = [];
   for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
@@ -54,15 +92,23 @@ export async function postToChannel(bot, config, { items, caption }) {
     const [item] = items;
     if (item.type === 'video') {
       const meta = await videoMeta(item, config);
-      const sent = await bot.api.sendVideo(target, new InputFile(item.path), {
-        caption: caption || undefined,
-        ...meta,
-      });
+      const sent = await withRetry(
+        () =>
+          bot.api.sendVideo(target, new InputFile(item.path), {
+            caption: caption || undefined,
+            ...meta,
+          }),
+        { label: 'sendVideo' },
+      );
       return [sent.message_id];
     }
-    const sent = await bot.api.sendPhoto(target, new InputFile(item.path), {
-      caption: caption || undefined,
-    });
+    const sent = await withRetry(
+      () =>
+        bot.api.sendPhoto(target, new InputFile(item.path), {
+          caption: caption || undefined,
+        }),
+      { label: 'sendPhoto' },
+    );
     return [sent.message_id];
   }
 
@@ -85,7 +131,9 @@ export async function postToChannel(bot, config, { items, caption }) {
       }
     }
     try {
-      const sent = await bot.api.sendMediaGroup(target, media);
+      const sent = await withRetry(() => bot.api.sendMediaGroup(target, media), {
+        label: 'sendMediaGroup',
+      });
       messageIds.push(...sent.map((message) => message.message_id));
     } catch (err) {
       // A multi-group album that fails half way has already put real messages

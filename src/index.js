@@ -13,6 +13,13 @@ import { postToChannel, deletePost } from './poster.js';
 import { Queue } from './queue.js';
 import { PostStore } from './store.js';
 import { run } from './media.js';
+import {
+  sweepTemp,
+  freeSpaceMb,
+  updateDownloader,
+  startMaintenance,
+  selfCheck,
+} from './maintenance.js';
 
 const startedAt = Date.now();
 
@@ -59,16 +66,11 @@ async function main() {
   await fs.mkdir(config.tmpDir, { recursive: true });
   await fs.mkdir(config.dataDir, { recursive: true });
 
-  // Instagram breaks yt-dlp regularly, and on a box nobody logs into, a
-  // self-update at boot is the difference between "restart it" and "SSH in".
-  if (config.ytdlpAutoUpdate) {
-    try {
-      const { stdout } = await run(config.ytdlpPath, ['-U'], { timeoutMs: 120000 });
-      log.info('yt-dlp update:', stdout.trim().split('\n').pop() || 'done');
-    } catch (err) {
-      log.warn('yt-dlp self-update failed (continuing) —', err.message);
-    }
-  }
+  // Anything left behind by a container that died mid-job. Runs before the
+  // first download so a full disk is fixed rather than merely reported.
+  await sweepTemp(config).catch(() => {});
+
+  if (config.ytdlpAutoUpdate) await updateDownloader(config);
 
   if (config.cover.logoMissing) {
     log.warn(
@@ -177,6 +179,22 @@ async function main() {
   });
 
   async function runJob(ctx, url, statusId) {
+    // A full disk turns every download into a confusing failure. Try to fix it
+    // first — the usual cause is debris from a job killed mid-encode — and only
+    // then refuse, with a message that says what is actually wrong.
+    let free = await freeSpaceMb(config.tmpDir);
+    if (free !== null && free < config.minFreeSpaceMb) {
+      log.warn(`only ${free}MB free, sweeping temp files`);
+      await sweepTemp(config, { staleAfterMs: 0 }).catch(() => {});
+      free = await freeSpaceMb(config.tmpDir);
+      if (free !== null && free < config.minFreeSpaceMb) {
+        throw new Error(
+          `The disk is nearly full (${free}MB free) — nothing was downloaded. ` +
+            'Free up space on the machine running the bot.',
+        );
+      }
+    }
+
     const workDir = path.join(config.tmpDir, crypto.randomUUID());
     await fs.mkdir(workDir, { recursive: true });
     try {
@@ -352,24 +370,56 @@ async function main() {
     }
   });
 
-  await bot.api.setMyCommands([
-    { command: 'help', description: 'How to use this bot' },
-    { command: 'status', description: 'Queue, uptime and settings' },
-    { command: 'whoami', description: 'Show my Telegram id' },
-  ]);
-
-  // Fail loudly at boot rather than on the first post: "bot is not a member of
-  // the channel" is the most common setup mistake and it is invisible until
-  // something is actually being posted.
+  // Check the token first, and say so in words. A rejected token otherwise
+  // surfaces as a stack trace from whichever API call happened to run first,
+  // which is the least useful possible way to learn you pasted it wrong.
   try {
-    const chat = await bot.api.getChat(config.channelId);
-    log.info(`channel ok: ${chat.title || chat.username || config.channelId}`);
+    await bot.init();
+    log.info(`authenticated as @${bot.botInfo.username}`);
   } catch (err) {
-    log.error(
-      `⚠️  Cannot see channel ${config.channelId} — ${err.description || err.message}. ` +
-        'Add the bot to the channel as an admin with "Post messages" permission.',
-    );
+    if (err.error_code === 401) {
+      process.stderr.write(
+        '\n✖ Telegram rejected BOT_TOKEN (401 Unauthorized).\n' +
+          '  Copy it again from @BotFather — it looks like 8123456789:AAH...\n\n',
+      );
+      process.exit(1);
+    }
+    throw err;
   }
+
+  // Cosmetic: this only populates the "/" menu in Telegram's UI. A network
+  // blip here must not take down an otherwise working bot at boot.
+  await bot.api
+    .setMyCommands([
+      { command: 'help', description: 'How to use this bot' },
+      { command: 'status', description: 'Queue, uptime and settings' },
+      { command: 'whoami', description: 'Show my Telegram id' },
+    ])
+    .catch((err) => log.warn('could not set the command menu —', err.description || err.message));
+
+  // Check everything at boot rather than discovering it on the first post, and
+  // put any problems where a human will actually see them. On an unattended box
+  // a warning in the log is a warning nobody reads — so it goes to Telegram.
+  const problems = await selfCheck(config, bot);
+  if (!problems.length) {
+    log.info('self-check: all good');
+  } else {
+    for (const problem of problems) log.error('self-check:', problem);
+    if (config.alertAdminsOnBoot) {
+      const message =
+        '⚠️ The reposter started with problems:\n\n' +
+        problems.map((p) => `• ${p}`).join('\n') +
+        '\n\nIt is running, but these need fixing.';
+      for (const adminId of config.adminIds) {
+        // A DM the admin has never opened will fail; that must not stop boot.
+        await bot.api.sendMessage(adminId, message).catch((err) => {
+          log.warn(`could not alert admin ${adminId} —`, err.description || err.message);
+        });
+      }
+    }
+  }
+
+  const stopMaintenance = startMaintenance(config);
 
   const webhookPath = `/telegram/${crypto
     .createHash('sha256')
@@ -410,7 +460,6 @@ async function main() {
 
   if (config.mode === 'webhook') {
     const url = `${config.webhookUrl.replace(/\/+$/, '')}${webhookPath}`;
-    await bot.init();
     await bot.api.setWebhook(url, {
       secret_token: config.webhookSecret || undefined,
       drop_pending_updates: true,
@@ -426,6 +475,7 @@ async function main() {
 
   const shutdown = async (signal) => {
     log.info(`${signal} — shutting down`);
+    stopMaintenance();
     server.close();
     try {
       await bot.stop();
@@ -437,6 +487,24 @@ async function main() {
   process.once('SIGINT', () => shutdown('SIGINT'));
   process.once('SIGTERM', () => shutdown('SIGTERM'));
 }
+
+/**
+ * Last line of defence.
+ *
+ * These should never fire — every known path handles its own errors — but an
+ * unhandled rejection or an uncaught throw would otherwise kill the process
+ * with a bare stack trace and no explanation. Log it clearly and exit non-zero
+ * so the container's restart policy brings the bot straight back, rather than
+ * leaving it dead until somebody notices.
+ */
+process.on('unhandledRejection', (reason) => {
+  log.error('unhandled rejection — restarting:', reason);
+  process.exit(1);
+});
+process.on('uncaughtException', (err) => {
+  log.error('uncaught exception — restarting:', err);
+  process.exit(1);
+});
 
 main().catch((err) => {
   log.error('fatal —', err);

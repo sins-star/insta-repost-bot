@@ -137,6 +137,40 @@ Turn it off with `COVER_EXISTING=false`. Blur without stamping the logo with
 
 ---
 
+## Does it need looking after?
+
+Mostly no — but here is the honest version, because "set it up and forget it" is
+only true if you know what it does on its own.
+
+**What it fixes without you:**
+
+| | |
+|---|---|
+| **Instagram breaks the downloader** | Updates yt-dlp at boot and every 24h after. This is the big one — it's *the* reason a bot like this normally dies after a few weeks. |
+| **A download fails** | Falls back to a second, independent downloader automatically. |
+| **The disk fills up** | Sweeps files left behind by jobs killed mid-encode, hourly and before any download that finds space short. |
+| **Telegram rate-limits or hiccups** | Waits out the flood limit and retries instead of losing the post. |
+| **A watermark won't render** | Posts the clip anyway and tells you it went out unwatermarked. |
+| **The process crashes** | Exits cleanly so Docker restarts it (`restart: unless-stopped`), rather than dying quietly. |
+| **The video is too big** | Re-encodes smaller to fit Telegram's 50MB ceiling. |
+
+**What it tells you about instead of fixing**, because these need a human:
+
+- **It can't see the channel**, ffmpeg is missing, or the disk is genuinely full —
+  you get a Telegram message at startup, not a log line nobody reads.
+- **Instagram cookies expired** — it says so, in the reply to the link you sent.
+- **Instagram is rate-limiting** — it says to wait, or to add cookies.
+
+**What will eventually need you anyway, honestly:**
+
+- **Cookies, if you use them.** They expire every few weeks. Re-export, restart.
+- **A rebuild every several months.** Auto-update keeps yt-dlp current, but not
+  ffmpeg or Node. `docker compose up -d --build` when you think of it.
+- **A really bad Instagram change.** Once in a while a change breaks yt-dlp for
+  days, not hours. Nothing on your side can fix that — it's the same for everyone.
+
+---
+
 ## When Instagram starts asking for a login
 
 Instagram rate-limits anonymous downloads hard, and the bot will tell you when that's what
@@ -210,6 +244,6 @@ tells you it went out unwatermarked rather than pretending it worked.
 | `scripts/doctor.js` | Pre-flight check |
 
 ```bash
-npm test    # 74 tests; the ffmpeg ones build real media and run the real filter graphs
+npm test    # 102 tests; the ffmpeg ones build real media and run the real filter graphs
 npm run doctor
 ```

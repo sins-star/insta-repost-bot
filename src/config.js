@@ -153,7 +153,25 @@ export function loadConfig(source = process.env) {
       ffmpegPath: str('FFMPEG_PATH', 'ffmpeg'),
       ffprobePath: str('FFPROBE_PATH', 'ffprobe'),
       cookiesFile: str('COOKIES_FILE', ''),
-      ytdlpAutoUpdate: bool('YTDLP_AUTO_UPDATE', false),
+
+      // On by default. Instagram breaks the extractor every few weeks and the
+      // fix lands upstream within days — but only reaches a long-running
+      // container if something pulls it. This is the difference between the bot
+      // healing itself overnight and someone having to go and fix it.
+      ytdlpAutoUpdate: bool('YTDLP_AUTO_UPDATE', true),
+      updateIntervalHours: num('YTDLP_UPDATE_INTERVAL_HOURS', 24, { min: 1, max: 720 }),
+      // NOT `yt-dlp -U`: that refuses to update a pip install, which is how the
+      // image installs it (the standalone builds do not all bundle curl_cffi).
+      // `--user` is what lets the non-root container user write the upgrade.
+      ytdlpUpdateCmd: str(
+        'YTDLP_UPDATE_CMD',
+        'pip3 install --user --upgrade --no-cache-dir --break-system-packages yt-dlp[default,curl-cffi]',
+      )
+        .split(/\s+/)
+        .filter(Boolean),
+
+      minFreeSpaceMb: num('MIN_FREE_SPACE_MB', 500, { min: 0, max: 100000, integer: true }),
+      alertAdminsOnBoot: bool('ALERT_ADMINS_ON_BOOT', true),
 
       // Telegram refuses any bot upload over 50MB. Watermarking re-encodes, so
       // a 48MB download can come out the other side above the ceiling — this is
