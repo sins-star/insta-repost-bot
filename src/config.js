@@ -113,6 +113,9 @@ export function loadConfig(source = process.env) {
       adminIds: parseAdminIds(req('ADMIN_IDS')),
 
       mode,
+      // Point this at a self-hosted tdlib/telegram-bot-api server to lift the
+      // 50MB upload ceiling to 2GB. Empty means Telegram's own API.
+      apiRoot: str('TELEGRAM_API_ROOT', ''),
       port: num('PORT', 8080, { min: 1, max: 65535, integer: true }),
       webhookUrl: str('WEBHOOK_URL', ''),
       webhookSecret: str('WEBHOOK_SECRET', ''),
@@ -159,7 +162,9 @@ export function loadConfig(source = process.env) {
       // container if something pulls it. This is the difference between the bot
       // healing itself overnight and someone having to go and fix it.
       ytdlpAutoUpdate: bool('YTDLP_AUTO_UPDATE', true),
-      updateIntervalHours: num('YTDLP_UPDATE_INTERVAL_HOURS', 24, { min: 1, max: 720 }),
+      // Capped below 596h on purpose: setInterval silently reinterprets any
+      // delay above 2^31-1 ms as 1ms, which would spawn pip in a tight loop.
+      updateIntervalHours: num('YTDLP_UPDATE_INTERVAL_HOURS', 24, { min: 1, max: 500 }),
       // NOT `yt-dlp -U`: that refuses to update a pip install, which is how the
       // image installs it (the standalone builds do not all bundle curl_cffi).
       // `--user` is what lets the non-root container user write the upgrade.

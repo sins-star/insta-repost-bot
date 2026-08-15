@@ -7,33 +7,60 @@ export const ALBUM_LIMIT = 10;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+const NETWORK_ERROR_CODES = new Set([
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'EPIPE',
+  'ECONNREFUSED',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+]);
+
 /**
  * Retry the transient Telegram failures.
  *
- * Two of these are routine rather than exceptional and neither means the post
- * is wrong: 429 is Telegram's flood limit, which arrives with a `retry_after`
- * telling you exactly how long to wait, and a 5xx or a dropped connection is
- * Telegram having a moment. Without this, either one loses a post that would
- * have succeeded seconds later — and on an unattended bot that looks like a bug.
+ * A 429 flood limit is routine rather than exceptional and arrives with a
+ * `retry_after` saying exactly how long to wait; a 5xx is Telegram having a
+ * moment. Neither means the post was wrong, and without this both lose a post
+ * that would have succeeded seconds later.
  *
- * A 400 is NOT retried: that means the request itself is wrong, and repeating
- * it just wastes time.
+ * A 400 is never retried — that means the request itself is bad.
+ *
+ * @param retryNetwork Whether a dropped connection is worth retrying. False for
+ * anything that SENDS: if the connection dies after Telegram accepted the
+ * message but before the reply arrives, retrying posts it to the channel twice,
+ * and the Delete button only knows about the second copy. A flood limit and a
+ * 5xx both mean the message was not accepted, so those stay retriable.
  */
-export async function withRetry(fn, { attempts = 4, label = 'telegram', baseDelayMs = 1000 } = {}) {
+export async function withRetry(
+  fn,
+  { attempts = 4, label = 'telegram', baseDelayMs = 1000, maxWaitMs = 60000, retryNetwork = true } = {},
+) {
   for (let attempt = 0; ; attempt += 1) {
     try {
       return await fn();
     } catch (err) {
       const code = err.error_code;
       const retryAfter = err.parameters?.retry_after;
+
+      const isNetwork = err.name === 'HttpError' || NETWORK_ERROR_CODES.has(err.code);
+      // Deliberately NOT "anything without a Telegram error code" — that
+      // retried genuine bugs, like a TypeError or a missing local file, four
+      // times over with backoff before reporting the same failure.
       const transient =
-        code === 429 || (code >= 500 && code < 600) || err.name === 'HttpError' || !code;
+        code === 429 ||
+        (typeof code === 'number' && code >= 500 && code < 600) ||
+        (isNetwork && retryNetwork);
 
       if (!transient || attempt >= attempts - 1) throw err;
 
-      const waitMs = retryAfter
-        ? (retryAfter + 1) * baseDelayMs
-        : Math.min(30 * baseDelayMs, 2 ** attempt * baseDelayMs);
+      // retry_after is in SECONDS and is capped: Telegram can ask for an hour,
+      // and the queue is serial, so an uncapped sleep here stalls every other
+      // repost behind it for that whole time.
+      const waitMs =
+        retryAfter != null
+          ? Math.min(retryAfter * 1000 + 1000, maxWaitMs)
+          : Math.min(30 * baseDelayMs, 2 ** attempt * baseDelayMs);
       log.warn(
         `${label}: ${err.description || err.message} — retrying in ${Math.round(waitMs / 1000)}s ` +
           `(attempt ${attempt + 2}/${attempts})`,
@@ -98,7 +125,7 @@ export async function postToChannel(bot, config, { items, caption }) {
             caption: caption || undefined,
             ...meta,
           }),
-        { label: 'sendVideo' },
+        { label: 'sendVideo', retryNetwork: false },
       );
       return [sent.message_id];
     }
@@ -107,7 +134,7 @@ export async function postToChannel(bot, config, { items, caption }) {
         bot.api.sendPhoto(target, new InputFile(item.path), {
           caption: caption || undefined,
         }),
-      { label: 'sendPhoto' },
+      { label: 'sendPhoto', retryNetwork: false },
     );
     return [sent.message_id];
   }
@@ -133,6 +160,7 @@ export async function postToChannel(bot, config, { items, caption }) {
     try {
       const sent = await withRetry(() => bot.api.sendMediaGroup(target, media), {
         label: 'sendMediaGroup',
+        retryNetwork: false,
       });
       messageIds.push(...sent.map((message) => message.message_id));
     } catch (err) {

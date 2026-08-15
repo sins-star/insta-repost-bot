@@ -21,6 +21,21 @@ const HOUR = 60 * 60 * 1000;
 /** Work directories older than this were orphaned by a crash or a restart. */
 const STALE_AFTER_MS = 6 * HOUR;
 
+/** setInterval silently reinterprets anything above this as 1ms. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
+/**
+ * Work directories are named with crypto.randomUUID(), and ONLY those are ever
+ * deleted.
+ *
+ * The sweeper runs with staleAfterMs=0 when disk is short, which makes every
+ * entry eligible by age. Without this filter, pointing TMP_DIR at a shared
+ * location — /tmp, say — would delete other programs' files. Matching our own
+ * naming scheme means the worst case is that we skip something of ours.
+ */
+const WORK_DIR_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /**
  * Delete abandoned work directories.
  *
@@ -43,9 +58,10 @@ export async function sweepTemp(config, { staleAfterMs = STALE_AFTER_MS } = {}) 
   let freedBytes = 0;
 
   for (const entry of entries) {
+    if (!WORK_DIR_PATTERN.test(entry.name)) continue;
     const full = path.join(config.tmpDir, entry.name);
     try {
-      const info = await fs.stat(full);
+      const info = await fs.lstat(full);
       if (info.mtimeMs > cutoff) continue;
       freedBytes += await directorySize(full);
       await fs.rm(full, { recursive: true, force: true });
@@ -63,7 +79,10 @@ export async function sweepTemp(config, { staleAfterMs = STALE_AFTER_MS } = {}) 
 async function directorySize(target) {
   let total = 0;
   try {
-    const info = await fs.stat(target);
+    // lstat, not stat: following a symlink here would walk whatever it points
+    // at — potentially the whole filesystem — while the disk guard waits.
+    const info = await fs.lstat(target);
+    if (info.isSymbolicLink()) return 0;
     if (!info.isDirectory()) return info.size;
     for (const entry of await fs.readdir(target)) {
       total += await directorySize(path.join(target, entry));
@@ -130,7 +149,7 @@ export async function updateDownloader(config) {
  * @returns {() => void} a stop function, so shutdown does not hang on pending
  * timers.
  */
-export function startMaintenance(config) {
+export function startMaintenance(config, { exclusive = (fn) => fn() } = {}) {
   const timers = [];
 
   const sweep = () => {
@@ -139,12 +158,34 @@ export function startMaintenance(config) {
   timers.push(setInterval(sweep, HOUR));
 
   if (config.ytdlpAutoUpdate) {
-    const update = () => {
-      updateDownloader(config).catch(() => {
-        /* updateDownloader never throws; this is belt and braces */
-      });
+    // Two guards on one timer:
+    //
+    // `updating` stops a slow pip run from overlapping the next tick and
+    // stacking concurrent installs on a small box.
+    //
+    // `exclusive` runs the update through the job queue, so it cannot replace
+    // yt-dlp underneath a download that is already running — yt-dlp imports its
+    // extractors lazily, and pip's uninstall step removing those files mid-run
+    // surfaces as a baffling ImportError.
+    let updating = false;
+    const update = async () => {
+      if (updating) {
+        log.warn('skipping downloader update — the previous one is still running');
+        return;
+      }
+      updating = true;
+      try {
+        await exclusive(() => updateDownloader(config));
+      } catch (err) {
+        log.warn('downloader update could not run —', err.message);
+      } finally {
+        updating = false;
+      }
     };
-    timers.push(setInterval(update, config.updateIntervalHours * HOUR));
+    // Above 2^31-1 ms setInterval silently becomes 1ms — which would spawn pip
+    // in a tight loop. The config caps the hours, and this is the backstop.
+    const intervalMs = Math.min(config.updateIntervalHours * HOUR, MAX_TIMER_MS);
+    timers.push(setInterval(update, intervalMs));
   }
 
   // Timers must not hold the event loop open on their own, or a shutdown waits

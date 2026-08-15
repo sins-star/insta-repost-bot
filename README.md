@@ -161,6 +161,14 @@ only true if you know what it does on its own.
 - **Instagram cookies expired** — it says so, in the reply to the link you sent.
 - **Instagram is rate-limiting** — it says to wait, or to add cookies.
 
+**What it does when it genuinely can't run:**
+
+- **Telegram unreachable at startup** — waits 60 seconds, then exits so the
+  container restarts and tries again. It will not sit there alive and silent.
+- **Two copies running on one token** (an overlapping redeploy) — says exactly
+  that, by name, instead of looping anonymously.
+- **A bad `BOT_TOKEN`** — one readable line, not a stack trace.
+
 **What will eventually need you anyway, honestly:**
 
 - **Cookies, if you use them.** They expire every few weeks. Re-export, restart.
@@ -244,6 +252,6 @@ tells you it went out unwatermarked rather than pretending it worked.
 | `scripts/doctor.js` | Pre-flight check |
 
 ```bash
-npm test    # 102 tests; the ffmpeg ones build real media and run the real filter graphs
+npm test    # 107 tests; the ffmpeg ones build real media and run the real filter graphs
 npm run doctor
 ```

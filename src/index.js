@@ -83,7 +83,10 @@ async function main() {
   await store.load();
   const queue = new Queue({ limit: config.queueLimit });
 
-  const bot = new Bot(config.botToken);
+  const bot = new Bot(
+    config.botToken,
+    config.apiRoot ? { client: { apiRoot: config.apiRoot } } : undefined,
+  );
 
   bot.catch((err) => {
     const e = err.error;
@@ -370,56 +373,6 @@ async function main() {
     }
   });
 
-  // Check the token first, and say so in words. A rejected token otherwise
-  // surfaces as a stack trace from whichever API call happened to run first,
-  // which is the least useful possible way to learn you pasted it wrong.
-  try {
-    await bot.init();
-    log.info(`authenticated as @${bot.botInfo.username}`);
-  } catch (err) {
-    if (err.error_code === 401) {
-      process.stderr.write(
-        '\n✖ Telegram rejected BOT_TOKEN (401 Unauthorized).\n' +
-          '  Copy it again from @BotFather — it looks like 8123456789:AAH...\n\n',
-      );
-      process.exit(1);
-    }
-    throw err;
-  }
-
-  // Cosmetic: this only populates the "/" menu in Telegram's UI. A network
-  // blip here must not take down an otherwise working bot at boot.
-  await bot.api
-    .setMyCommands([
-      { command: 'help', description: 'How to use this bot' },
-      { command: 'status', description: 'Queue, uptime and settings' },
-      { command: 'whoami', description: 'Show my Telegram id' },
-    ])
-    .catch((err) => log.warn('could not set the command menu —', err.description || err.message));
-
-  // Check everything at boot rather than discovering it on the first post, and
-  // put any problems where a human will actually see them. On an unattended box
-  // a warning in the log is a warning nobody reads — so it goes to Telegram.
-  const problems = await selfCheck(config, bot);
-  if (!problems.length) {
-    log.info('self-check: all good');
-  } else {
-    for (const problem of problems) log.error('self-check:', problem);
-    if (config.alertAdminsOnBoot) {
-      const message =
-        '⚠️ The reposter started with problems:\n\n' +
-        problems.map((p) => `• ${p}`).join('\n') +
-        '\n\nIt is running, but these need fixing.';
-      for (const adminId of config.adminIds) {
-        // A DM the admin has never opened will fail; that must not stop boot.
-        await bot.api.sendMessage(adminId, message).catch((err) => {
-          log.warn(`could not alert admin ${adminId} —`, err.description || err.message);
-        });
-      }
-    }
-  }
-
-  const stopMaintenance = startMaintenance(config);
 
   const webhookPath = `/telegram/${crypto
     .createHash('sha256')
@@ -458,6 +411,86 @@ async function main() {
   await new Promise((resolve) => server.listen(config.port, resolve));
   log.info(`health server listening on :${config.port}`);
 
+  // Check the token first, and say so in words. A rejected token otherwise
+  // surfaces as a stack trace from whichever API call happened to run first,
+  // which is the least useful possible way to learn you pasted it wrong.
+  //
+  // The timeout is not decoration. grammY retries a network failure here
+  // FOREVER, with backoff up to 20 minutes, and never rejects — so with
+  // Telegram unreachable at startup this call simply never returns. Everything
+  // below it would never run, the process would sit alive and silent, and
+  // because `restart: unless-stopped` does not act on an unhealthy container,
+  // nothing would ever recover it. Bounding it turns that into a clean restart.
+  try {
+    await bot.init(AbortSignal.timeout(60000));
+    log.info(`authenticated as @${bot.botInfo.username}`);
+  } catch (err) {
+    if (err.error_code === 401) {
+      process.stderr.write(
+        '\n✖ Telegram rejected BOT_TOKEN (401 Unauthorized).\n' +
+          '  Copy it again from @BotFather — it looks like 8123456789:AAH...\n\n',
+      );
+      process.exit(1);
+    }
+    log.error('could not reach Telegram within 60s at startup — restarting:', err.message);
+    process.exit(1);
+  }
+
+  // Cosmetic: this only populates the "/" menu in Telegram's UI. A network
+  // blip here must not take down an otherwise working bot at boot.
+  bot.api
+    .setMyCommands([
+      { command: 'help', description: 'How to use this bot' },
+      { command: 'status', description: 'Queue, uptime and settings' },
+      { command: 'whoami', description: 'Show my Telegram id' },
+    ])
+    .catch((err) => log.warn('could not set the command menu —', err.description || err.message));
+
+  // Check everything at boot rather than discovering it on the first post, and
+  // put any problems where a human will actually see them. On an unattended box
+  // a warning in the log is a warning nobody reads — so it goes to Telegram.
+  //
+  // Deliberately NOT awaited. Every call inside is bounded but slow when
+  // Telegram is unwell — getChat, then one sendMessage per admin, all serial —
+  // and blocking the start of polling on a diagnostic would mean the bot is not
+  // accepting links while it works out how to tell you something is wrong.
+  const reportProblems = async () => {
+    const problems = await selfCheck(config, bot);
+    if (!problems.length) {
+      log.info('self-check: all good');
+      return;
+    }
+    for (const problem of problems) log.error('self-check:', problem);
+    if (!config.alertAdminsOnBoot) return;
+
+    const message =
+      '\u26a0\ufe0f The reposter started with problems:\n\n' +
+      problems.map((p) => `\u2022 ${p}`).join('\n') +
+      '\n\nIt is running, but these need fixing.';
+    for (const adminId of config.adminIds) {
+      // A DM the admin has never opened will fail; that must not stop anything.
+      await bot.api.sendMessage(adminId, message).catch((err) => {
+        log.warn(`could not alert admin ${adminId} \u2014`, err.description || err.message);
+      });
+    }
+  };
+  reportProblems().catch((err) => log.warn('self-check failed \u2014', err.message));
+
+  const stopMaintenance = startMaintenance(config, {
+    // Run the periodic downloader update THROUGH the job queue. pip's upgrade
+    // uninstalls before it reinstalls, and yt-dlp imports its extractors
+    // lazily — so replacing it underneath a download in progress surfaces as a
+    // baffling ImportError on a post that should have worked.
+    exclusive: (fn) => {
+      try {
+        return queue.push(fn).promise;
+      } catch (err) {
+        log.warn('could not queue the downloader update \u2014', err.message);
+        return Promise.resolve();
+      }
+    },
+  });
+
   if (config.mode === 'webhook') {
     const url = `${config.webhookUrl.replace(/\/+$/, '')}${webhookPath}`;
     await bot.api.setWebhook(url, {
@@ -467,10 +500,28 @@ async function main() {
     log.info(`webhook registered (@${bot.botInfo.username})`);
   } else {
     await bot.api.deleteWebhook({ drop_pending_updates: true }).catch(() => {});
-    bot.start({
-      drop_pending_updates: true,
-      onStart: (info) => log.info(`polling as @${info.username}`),
-    });
+    // bot.start() rejects on 401 and 409 — grammY rethrows those rather than
+    // routing them to bot.catch(). 409 means a second copy of this bot is
+    // polling the same token, which is what an overlapping redeploy looks like,
+    // and it is by far the most common operational error here. Without this it
+    // surfaced as an anonymous unhandled rejection and a restart loop with no
+    // explanation of the cause.
+    bot
+      .start({
+        drop_pending_updates: true,
+        onStart: (info) => log.info(`polling as @${info.username}`),
+      })
+      .catch((err) => {
+        if (err.error_code === 409) {
+          log.error(
+            'another instance of this bot is already running with the same token ' +
+              '(409 Conflict). Stop the other one — restarting will not help.',
+          );
+        } else {
+          log.error('polling stopped —', err.description || err.message);
+        }
+        process.exit(1);
+      });
   }
 
   const shutdown = async (signal) => {
@@ -497,13 +548,20 @@ async function main() {
  * so the container's restart policy brings the bot straight back, rather than
  * leaving it dead until somebody notices.
  */
+const exitAfterLogging = () => {
+  // stderr to a pipe — which is what Docker gives you — is asynchronous above
+  // 64KB, so exiting in the same tick truncates the very message explaining the
+  // crash. A short delay lets it flush.
+  setTimeout(() => process.exit(1), 250);
+};
+
 process.on('unhandledRejection', (reason) => {
   log.error('unhandled rejection — restarting:', reason);
-  process.exit(1);
+  exitAfterLogging();
 });
 process.on('uncaughtException', (err) => {
   log.error('uncaught exception — restarting:', err);
-  process.exit(1);
+  exitAfterLogging();
 });
 
 main().catch((err) => {
