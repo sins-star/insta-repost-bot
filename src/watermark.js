@@ -118,7 +118,9 @@ export function buildFilterGraph({
   chromaKey = '',
   blurStrength = 0.16,
 }) {
-  const hasCover = Boolean(cover);
+  // boxblur needs at least a few pixels per plane to work with, and a patch this
+  // small is not a watermark in the first place.
+  const hasCover = Boolean(cover) && Math.min(cover.w, cover.h) >= 8;
   if (mode === 'none' && !hasCover) return null;
   if (!width || !height) throw new Error('buildFilterGraph needs the real frame width and height');
 
@@ -159,7 +161,14 @@ export function buildFilterGraph({
     const { x, y, w, h } = cover;
     // Radius scales with the patch so a small logo is not over-blurred into a
     // grey smear and a large one is actually obliterated.
-    const radius = Math.max(2, Math.min(Math.floor(Math.min(w, h) / 2) - 1, Math.round(Math.min(w, h) * blurStrength)));
+    //
+    // The ceiling is a QUARTER of the patch, not a half. boxblur applies the
+    // same radius to the chroma planes, and in yuv420p those are half
+    // resolution — so a radius that is legal for luma is rejected for chroma
+    // and the whole filtergraph dies. When that happened the video posted with
+    // neither the cover nor our own watermark.
+    const maxRadius = Math.floor(Math.min(w, h) / 4);
+    const radius = Math.max(1, Math.min(maxRadius, Math.round(Math.min(w, h) * blurStrength)));
 
     chains.push(`[${current}]split=2[covbase][covsrc]`);
     chains.push(`[covsrc]crop=${w}:${h}:${x}:${y},boxblur=${radius}:2[covblur]`);
@@ -167,8 +176,17 @@ export function buildFilterGraph({
     current = 'covout';
 
     if (patchLogoLabel) {
+      // Bound BOTH dimensions. `scale=W:-1` keeps the aspect ratio but leaves
+      // the height free, so any logo taller than the patch's aspect ratio spills
+      // out of the region it is meant to fill — silently, since the graph still
+      // encodes. A square logo on a wide patch overflowed by 3.8× the intended
+      // area in testing, painting over 500px of the actual video.
       const patchLogoWidth = even(w * 0.9);
-      chains.push(`[${patchLogoLabel}]scale=${patchLogoWidth}:-1[covlogo]`);
+      const patchLogoHeight = even(h * 0.9);
+      chains.push(
+        `[${patchLogoLabel}]scale=${patchLogoWidth}:${patchLogoHeight}:` +
+          'force_original_aspect_ratio=decrease[covlogo]',
+      );
       // `${w}` is this region's width in pixels; bare `w`/`h` are ffmpeg's
       // overlay-input dimensions. Mixing them centres the logo on the patch
       // without needing to know the logo's aspect ratio here.

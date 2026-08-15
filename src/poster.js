@@ -8,6 +8,15 @@ export const ALBUM_LIMIT = 10;
 export function chunk(items, size = ALBUM_LIMIT) {
   const out = [];
   for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+
+  // Telegram accepts 2–10 items in an album, never 1. An 11-item carousel
+  // splits naively into [10, 1] and that trailing single is rejected outright —
+  // after the first ten are already live in the channel. Borrow one from the
+  // previous group so the tail is always a legal album.
+  const last = out[out.length - 1];
+  if (out.length > 1 && last.length === 1) {
+    last.unshift(out[out.length - 2].pop());
+  }
   return out;
 }
 
@@ -75,8 +84,17 @@ export async function postToChannel(bot, config, { items, caption }) {
         media.push({ type: 'photo', ...shared });
       }
     }
-    const sent = await bot.api.sendMediaGroup(target, media);
-    messageIds.push(...sent.map((message) => message.message_id));
+    try {
+      const sent = await bot.api.sendMediaGroup(target, media);
+      messageIds.push(...sent.map((message) => message.message_id));
+    } catch (err) {
+      // A multi-group album that fails half way has already put real messages
+      // in the channel. Carry those ids out on the error so the caller can still
+      // offer a Delete button instead of leaving a half-posted album behind with
+      // no way to take it down.
+      err.partialMessageIds = messageIds;
+      throw err;
+    }
   }
   return messageIds;
 }

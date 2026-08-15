@@ -79,6 +79,42 @@ test('webhook mode without a URL is refused', () => {
   assert.throws(() => loadConfig({ ...valid, MODE: 'webhook' }), /requires WEBHOOK_URL/);
 });
 
+test('a bare @ or a spaced name is not a channel', () => {
+  for (const bad of ['@', '@ my chan', '@ab', 'mychannel', '@has-a-dash']) {
+    assert.throws(() => loadConfig({ ...valid, CHANNEL_ID: bad }), /CHANNEL_ID/, `accepted "${bad}"`);
+  }
+});
+
+test('a positive numeric id is refused — that is a user, not a channel', () => {
+  assert.throws(() => loadConfig({ ...valid, CHANNEL_ID: '123456' }), /negative numeric id/);
+});
+
+test('counts must be whole numbers', () => {
+  // `for (row = 0; row < 3.7; row++)` silently drew 4 rows spaced for 3.7.
+  assert.throws(() => loadConfig({ ...valid, WATERMARK_TILE_ROWS: '3.7' }), /whole number/);
+  assert.throws(() => loadConfig({ ...valid, QUEUE_LIMIT: '2.5' }), /whole number/);
+  assert.throws(() => loadConfig({ ...valid, PORT: '8080.7' }), /whole number/);
+});
+
+test('numbers that are not plain decimals are rejected', () => {
+  // Number('0x1f90') is 8080 — a typo that silently becomes a valid port.
+  assert.throws(() => loadConfig({ ...valid, PORT: '0x1f90' }), /must be a number/);
+  assert.throws(() => loadConfig({ ...valid, PORT: '1e3' }), /must be a number/);
+});
+
+test('the chroma key cannot smuggle extra filters into the graph', () => {
+  // This value is concatenated raw into the ffmpeg filtergraph.
+  assert.throws(
+    () => loadConfig({ ...valid, WATERMARK_CHROMA_KEY: '0x000000:1:1,drawbox=x=0' }),
+    /must be a colour/,
+  );
+  assert.equal(
+    loadConfig({ ...valid, WATERMARK_CHROMA_KEY: '0x000000' }).watermark.chromaKey,
+    '0x000000',
+  );
+  assert.equal(loadConfig({ ...valid, WATERMARK_CHROMA_KEY: 'black' }).watermark.chromaKey, 'black');
+});
+
 test('out-of-range numbers are rejected with their bounds', () => {
   assert.throws(() => loadConfig({ ...valid, WATERMARK_OPACITY: '5' }), /between 0 and 1/);
   assert.throws(() => loadConfig({ ...valid, WATERMARK_OPACITY: 'quite' }), /must be a number/);

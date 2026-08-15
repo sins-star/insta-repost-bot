@@ -209,7 +209,36 @@ async function main() {
 
       await setStatus(ctx, statusId, '📤 Posting to the channel…');
       const caption = buildCaption(result, config);
-      const messageIds = await postToChannel(bot, config, { items: finished, caption });
+
+      let messageIds;
+      try {
+        messageIds = await postToChannel(bot, config, { items: finished, caption });
+      } catch (err) {
+        // Part of a multi-group album may already be live. Record what did post
+        // so the Delete button can still take it down.
+        const partial = err.partialMessageIds || [];
+        if (!partial.length) throw err;
+
+        const partialId = await store.add({
+          chatId: config.channelId,
+          messageIds: partial,
+          url,
+          postedBy: ctx.from?.id,
+        });
+        await setStatus(
+          ctx,
+          statusId,
+          `🚫 Posting failed part-way: ${err.message}\n\n` +
+            `⚠️ ${partial.length} item(s) are already live in the channel.`,
+          {
+            reply_markup: new InlineKeyboard().text(
+              '❌ Delete what posted',
+              `del:${partialId}`,
+            ),
+          },
+        );
+        return;
+      }
 
       const recordId = await store.add({
         chatId: config.channelId,
@@ -268,19 +297,31 @@ async function main() {
       return;
     }
 
+    // Attach the rejection handler SYNCHRONOUSLY, before anything is awaited.
+    //
+    // queue.push() starts the job immediately, so a fast failure — yt-dlp
+    // missing, spawn ENOENT, which land in about a millisecond — can reject
+    // while the "waiting in queue" edit below is still in flight to Telegram.
+    // A rejected promise with no handler yet attached is an unhandled rejection,
+    // and Node's default for those is to terminate the process: the bot dies and
+    // every other queued job dies with it.
+    const settled = job.promise.then(
+      () => null,
+      (err) => err,
+    );
+
     if (job.position > 0) {
       await setStatus(ctx, statusId, `⏳ Waiting — ${job.position} ahead in the queue…`);
     }
 
-    try {
-      await job.promise;
-    } catch (err) {
-      if (err instanceof DownloadError) {
-        await setStatus(ctx, statusId, `🚫 ${err.message}\n\n${err.hint}`);
-      } else {
-        log.error('job error —', err);
-        await setStatus(ctx, statusId, `🚫 Something went wrong: ${err.message}`);
-      }
+    const err = await settled;
+    if (!err) return;
+
+    if (err instanceof DownloadError) {
+      await setStatus(ctx, statusId, `🚫 ${err.message}\n\n${err.hint}`);
+    } else {
+      log.error('job error —', err);
+      await setStatus(ctx, statusId, `🚫 Something went wrong: ${err.message}`);
     }
   }
 

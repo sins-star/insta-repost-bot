@@ -287,6 +287,13 @@ export function buildCaption({ caption, uploader, url }, config) {
   let text = parts.join('\n\n').trim();
   const limit = config.caption.maxLength;
   if (limit === 0) return '';
-  if (text.length > limit) text = `${text.slice(0, Math.max(0, limit - 1)).trimEnd()}…`;
+  if (text.length > limit) {
+    let cut = text.slice(0, Math.max(0, limit - 1));
+    // An emoji is two UTF-16 units. Slicing between them leaves a lone
+    // surrogate, which is encoded on the wire as the replacement character —
+    // so the caption ends in a stray "�".
+    if (/[\uD800-\uDBFF]$/.test(cut)) cut = cut.slice(0, -1);
+    text = `${cut.trimEnd()}…`;
+  }
   return text;
 }

@@ -26,6 +26,9 @@ export class PostStore {
       const raw = await fs.readFile(this.file, 'utf8');
       const parsed = JSON.parse(raw);
       for (const [key, value] of Object.entries(parsed)) this.records.set(key, value);
+      // A file grown past the cap otherwise stays fully in memory until the
+      // next add() happens to trim it.
+      this.#prune();
       log.info(`loaded ${this.records.size} post record(s)`);
     } catch (err) {
       if (err.code !== 'ENOENT') log.warn('could not read post store —', err.message);

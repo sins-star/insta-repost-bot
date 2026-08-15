@@ -108,6 +108,24 @@ test('captions are truncated below Telegram hard limit', () => {
   assert.ok(text.endsWith('…'));
 });
 
+test('truncation does not split an emoji in half', () => {
+  // An emoji is two UTF-16 units. Cutting between them leaves a lone surrogate,
+  // which goes down the wire as the replacement character — the caption ends
+  // in a stray black diamond.
+  const text = buildCaption(
+    { caption: '😀'.repeat(600), uploader: '', url: '' },
+    captionConfig({ maxLength: 1024 }),
+  );
+  assert.ok(text.length <= 1024);
+  const beforeEllipsis = text.charCodeAt(text.length - 2);
+  assert.ok(
+    !(beforeEllipsis >= 0xd800 && beforeEllipsis <= 0xdbff),
+    'caption ends in a lone high surrogate',
+  );
+  // Round-trip through the wire encoding: no replacement characters.
+  assert.ok(!Buffer.from(text, 'utf8').toString('utf8').includes('�'));
+});
+
 test('maxLength 0 means no caption at all', () => {
   const text = buildCaption({ caption: 'hello', uploader: '', url: '' }, captionConfig({ maxLength: 0 }));
   assert.equal(text, '');

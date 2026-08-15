@@ -22,11 +22,19 @@ function str(name, fallback) {
   return value || fallback;
 }
 
-function num(name, fallback, { min = -Infinity, max = Infinity } = {}) {
+function num(name, fallback, { min = -Infinity, max = Infinity, integer = false } = {}) {
   const raw = (env[name] || '').trim();
   if (!raw) return fallback;
+  // Number() would happily accept '0x1f90' and '1e3'. Config files are written
+  // by hand, so a value that does not look like a plain number is a typo.
+  if (!/^-?\d+(\.\d+)?$/.test(raw)) {
+    throw new ConfigError(`${name} must be a number, got "${raw}"`);
+  }
   const value = Number(raw);
   if (!Number.isFinite(value)) throw new ConfigError(`${name} must be a number, got "${raw}"`);
+  if (integer && !Number.isInteger(value)) {
+    throw new ConfigError(`${name} must be a whole number, got ${value}`);
+  }
   if (value < min || value > max) {
     throw new ConfigError(`${name} must be between ${min} and ${max}, got ${value}`);
   }
@@ -76,10 +84,13 @@ function parseAdminIds(raw) {
  * treats a bare unprefixed name as an unknown chat, so catch it at boot.
  */
 function parseChannel(raw) {
-  if (/^-?\d+$/.test(raw)) return Number(raw);
-  if (raw.startsWith('@')) return raw;
+  if (/^-\d+$/.test(raw)) return Number(raw);
+  // A bare '@' or '@ my chan' used to pass, and a positive number — which is a
+  // USER id, never a channel — was accepted silently. Both only surfaced as a
+  // failure on the first attempted post.
+  if (/^@[A-Za-z0-9_]{4,31}$/.test(raw)) return raw;
   throw new ConfigError(
-    `CHANNEL_ID must be "@channelname" or a numeric id like -1001234567890 — got "${raw}"`,
+    `CHANNEL_ID must be "@channelname" or a negative numeric id like -1001234567890 — got "${raw}"`,
   );
 }
 
@@ -102,7 +113,7 @@ export function loadConfig(source = process.env) {
       adminIds: parseAdminIds(req('ADMIN_IDS')),
 
       mode,
-      port: num('PORT', 8080, { min: 1, max: 65535 }),
+      port: num('PORT', 8080, { min: 1, max: 65535, integer: true }),
       webhookUrl: str('WEBHOOK_URL', ''),
       webhookSecret: str('WEBHOOK_SECRET', ''),
 
@@ -116,8 +127,8 @@ export function loadConfig(source = process.env) {
         scale: num('WATERMARK_SCALE', 0.18, { min: 0.01, max: 1 }),
         textScale: num('WATERMARK_TEXT_SCALE', 0.045, { min: 0.005, max: 0.5 }),
         margin: num('WATERMARK_MARGIN', 0.03, { min: 0, max: 0.45 }),
-        tileRows: num('WATERMARK_TILE_ROWS', 3, { min: 1, max: 10 }),
-        tileCols: num('WATERMARK_TILE_COLS', 3, { min: 1, max: 10 }),
+        tileRows: num('WATERMARK_TILE_ROWS', 3, { min: 1, max: 10, integer: true }),
+        tileCols: num('WATERMARK_TILE_COLS', 3, { min: 1, max: 10, integer: true }),
         // Knocks a solid backdrop out of a logo that has no alpha channel —
         // otherwise a logo saved on black lands as a black box on the video.
         chromaKey: str('WATERMARK_CHROMA_KEY', ''),
@@ -132,7 +143,7 @@ export function loadConfig(source = process.env) {
       caption: {
         mode: oneOf('CAPTION_MODE', 'original', ['original', 'none']),
         suffix: str('CAPTION_SUFFIX', '').replace(/\\n/g, '\n'),
-        maxLength: num('CAPTION_MAX_LENGTH', 1024, { min: 0, max: 1024 }),
+        maxLength: num('CAPTION_MAX_LENGTH', 1024, { min: 0, max: 1024, integer: true }),
       },
 
       ytdlpPath: str('YTDLP_PATH', 'yt-dlp'),
@@ -154,7 +165,7 @@ export function loadConfig(source = process.env) {
       maxFilesizeMb: num('MAX_FILESIZE_MB', 48, { min: 1, max: 2000 }),
       downloadTimeoutMs: num('DOWNLOAD_TIMEOUT_SEC', 180, { min: 10, max: 3600 }) * 1000,
       encodeTimeoutMs: num('ENCODE_TIMEOUT_SEC', 600, { min: 10, max: 7200 }) * 1000,
-      queueLimit: num('QUEUE_LIMIT', 20, { min: 1, max: 500 }),
+      queueLimit: num('QUEUE_LIMIT', 20, { min: 1, max: 500, integer: true }),
     };
 
     if (config.mode === 'webhook' && !config.webhookUrl) {
@@ -173,6 +184,20 @@ export function loadConfig(source = process.env) {
     }
     if (config.cookiesFile && !fs.existsSync(config.cookiesFile)) {
       throw new ConfigError(`COOKIES_FILE is set but ${config.cookiesFile} does not exist`);
+    }
+    // This value is concatenated straight into the ffmpeg filtergraph, where ':'
+    // and ',' separate options and filters. Everything else in the graph is
+    // either a computed number or an escaped path; this is the one free-text
+    // field, so it is constrained rather than escaped.
+    if (
+      config.watermark.chromaKey &&
+      !/^(?:0x|#)[0-9a-fA-F]{6}$/.test(config.watermark.chromaKey) &&
+      !/^[a-zA-Z]{3,20}$/.test(config.watermark.chromaKey)
+    ) {
+      throw new ConfigError(
+        'WATERMARK_CHROMA_KEY must be a colour like 0x000000, #000000 or "black" — ' +
+          `got "${config.watermark.chromaKey}"`,
+      );
     }
 
     // Stamping the logo over a covered watermark wants the same file the corner

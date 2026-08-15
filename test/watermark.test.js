@@ -104,9 +104,9 @@ test('mode none with nothing to cover skips encoding entirely', () => {
 
 test('the cover logo is centred on the region it hides', () => {
   const graph = buildFilterGraph({ ...base, mode: 'none', cover: region, coverLogo: true });
-  // 200 * 0.9 = 180
+  // 200 * 0.9 = 180 wide, 100 * 0.9 = 90 tall, fitted inside both
   assert.match(graph, /\[covlogo\]/);
-  assert.match(graph, /scale=180:-1/);
+  assert.match(graph, /scale=180:90:force_original_aspect_ratio=decrease/);
   assert.match(graph, /overlay=800\+\(200-w\)\/2:1600\+\(100-h\)\/2/);
 });
 
@@ -144,17 +144,47 @@ test('a chroma key is applied to the logo before it is split', () => {
   assert.match(graph, /\[logokey\]split=2/);
 });
 
-test('blur radius never exceeds what the patch can support', () => {
-  // boxblur rejects a radius wider than half the plane it is blurring.
-  const tiny = buildFilterGraph({
+test('blur radius stays within the CHROMA plane limit, not the luma one', () => {
+  // boxblur applies the same radius to chroma, which is half resolution in
+  // yuv420p — so the real ceiling is a quarter of the patch. An earlier version
+  // clamped to half and every cover encode failed above COVER_BLUR=0.25,
+  // posting the video with no watermark at all.
+  for (const blurStrength of [0.02, 0.16, 0.25, 0.3, 0.5]) {
+    for (const size of [8, 20, 100, 333]) {
+      const graph = buildFilterGraph({
+        ...base,
+        mode: 'none',
+        cover: { x: 0, y: 0, w: size, h: size },
+        blurStrength,
+      });
+      const radius = Number(graph.match(/boxblur=(\d+):/)[1]);
+      assert.ok(
+        radius <= Math.floor(size / 4),
+        `radius ${radius} exceeds the chroma limit ${Math.floor(size / 4)} for a ${size}px patch`,
+      );
+      assert.ok(radius >= 1, 'radius must be at least 1');
+    }
+  }
+});
+
+test('a patch too small to blur is skipped rather than encoded badly', () => {
+  // Below 8px there is no legal chroma radius at all.
+  assert.equal(
+    buildFilterGraph({ ...base, mode: 'none', cover: { x: 0, y: 0, w: 6, h: 6 } }),
+    null,
+  );
+});
+
+test('the cover logo is bounded on both axes so it cannot escape the patch', () => {
+  // scale=W:-1 leaves the height unbounded, so a tall logo overflows the region
+  // and paints over the video around it — silently, since the graph still runs.
+  const graph = buildFilterGraph({
     ...base,
     mode: 'none',
-    cover: { x: 0, y: 0, w: 6, h: 6 },
-    blurStrength: 0.5,
+    cover: { x: 100, y: 100, w: 300, h: 120 },
+    coverLogo: true,
   });
-  const radius = Number(tiny.match(/boxblur=(\d+):/)[1]);
-  assert.ok(radius <= 2, `radius ${radius} would be rejected by boxblur`);
-  assert.ok(radius >= 2);
+  assert.match(graph, /scale=270:108:force_original_aspect_ratio=decrease/);
 });
 
 test('margin is measured against width, consistently', () => {
