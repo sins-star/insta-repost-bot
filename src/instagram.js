@@ -171,13 +171,15 @@ async function runYtDlp(url, workDir, config) {
  */
 async function runGalleryDl(url, workDir, config) {
   const args = [
-    '--dest',
-    workDir,
+    // -D is "exact location": without it gallery-dl builds its own
+    // instagram/<user>/ tree underneath the destination and collect() finds
+    // nothing in the directory it was told to look in.
     '--directory',
-    '',
+    workDir,
     '--filename',
     '{num:>03}.{extension}',
     '--write-metadata',
+    '--no-part',
     '--retries',
     '3',
   ];
