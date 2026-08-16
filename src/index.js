@@ -14,6 +14,7 @@ import { Queue } from './queue.js';
 import { PostStore } from './store.js';
 import { RuntimeState } from './runtime.js';
 import { createDispatcher } from './dispatch.js';
+import { cleanCaption } from './clean.js';
 import { run } from './media.js';
 import {
   sweepTemp,
@@ -121,6 +122,10 @@ async function main() {
 
   const store = new PostStore(config.dataDir);
   await store.load();
+  // Forwarded posts staged behind a "Send to channel" button. Own file, small
+  // cap: anything the owner never tapped is abandoned, not precious.
+  const pendingStore = new PostStore(config.dataDir, { filename: 'pending.json', keep: 100 });
+  await pendingStore.load();
   const queue = new Queue({ limit: config.queueLimit });
 
   const bot = new Bot(
@@ -248,6 +253,7 @@ async function main() {
       title: name,
       type: chat.type,
       addedBy: actor,
+      username: chat.username || '',
     });
     if (!added) return;
 
@@ -271,7 +277,10 @@ async function main() {
       await ctx.answerCallbackQuery({ text: 'Not authorised.', show_alert: true });
       return;
     }
-    if (ctx.message) {
+    // Only answer strangers in PRIVATE chats. In a group or channel the bot
+    // sees every message, and replying "not authorised" to each one would spam
+    // the room within minutes.
+    if (ctx.message && ctx.chat?.type === 'private') {
       await ctx.reply(
         config.adminIds.length
           ? `Not authorised. Your id is ${userId} — it needs to be in ADMIN_IDS.`
@@ -320,6 +329,186 @@ async function main() {
       ].join('\n'),
     );
   });
+
+  /**
+   * The owner's channel @username — the one tag captions are allowed to carry.
+   * Resolved once, then remembered on the destination record.
+   */
+  let cachedOurUsername = null;
+  async function ourChannelUsername() {
+    if (cachedOurUsername !== null) return cachedOurUsername;
+    const stored = runtime.destinations.find((d) => d.username);
+    if (stored) return (cachedOurUsername = stored.username);
+    const first = destinations()[0];
+    if (!first) return (cachedOurUsername = '');
+    try {
+      const chat = await bot.api.getChat(first.id);
+      cachedOurUsername = chat.username || '';
+      if (chat.username) await runtime.setDestinationUsername(first.id, chat.username);
+    } catch {
+      cachedOurUsername = '';
+    }
+    return cachedOurUsername;
+  }
+
+  async function cleanForChannel(text) {
+    return cleanCaption(text, {
+      keep: [await ourChannelUsername(), bot.botInfo?.username],
+    });
+  }
+
+  /**
+   * Forwarded posts: strip the "Forwarded from" header, scrub the caption,
+   * preview, and post only when the owner taps Send.
+   *
+   * Re-sending by file_id is what removes the header — Telegram only renders
+   * it on true forwards — and it needs no download, so any file size works and
+   * the whole flow is a handful of API calls.
+   */
+  const pendingAlbums = new Map();
+
+  async function makePending(items, caption, removed, chatId) {
+    const id = await pendingStore.add({ items, caption });
+    const what =
+      items.length === 0 ? 'text post' : items.length === 1 ? items[0].type : `album of ${items.length}`;
+    const notes = removed ? ` · ${removed} foreign link/tag(s) cleaned` : '';
+    await bot.api.sendMessage(
+      chatId,
+      `📋 Ready to post (${what} · forwarded-from removed${notes})\n\n${caption || '(no caption)'}`,
+      {
+        reply_markup: new InlineKeyboard()
+          .text('📤 Send to channel', `send:${id}`)
+          .text('🗑 Discard', `x:${id}`),
+      },
+    );
+  }
+
+  async function flushAlbum(groupId) {
+    const group = pendingAlbums.get(groupId);
+    if (!group) return;
+    pendingAlbums.delete(groupId);
+    const { text, removed } = await cleanForChannel(group.caption);
+    await makePending(group.items, text, removed, group.chatId);
+  }
+
+  bot.on('message', async (ctx, next) => {
+    const m = ctx.message;
+    if (!m.forward_origin) return next();
+
+    const raw = m.text || m.caption || '';
+    // A forwarded post carrying an Instagram link goes down the full
+    // download-and-watermark pipeline instead.
+    if (findInstagramUrls(raw).length) return next();
+
+    const item = m.video
+      ? { type: 'video', fileId: m.video.file_id }
+      : m.photo
+        ? { type: 'photo', fileId: m.photo[m.photo.length - 1].file_id }
+        : m.animation
+          ? { type: 'animation', fileId: m.animation.file_id }
+          : m.document
+            ? { type: 'document', fileId: m.document.file_id }
+            : null;
+    if (!item && !m.text) return; // stickers, polls, contacts: nothing to repost
+
+    // Album items arrive as separate messages sharing a media_group_id; gather
+    // them briefly so they preview — and post — as one album. On serverless the
+    // wait runs inside a /work request, because a plain timer's CPU is frozen
+    // the moment the webhook response goes out.
+    if (m.media_group_id && item) {
+      let group = pendingAlbums.get(m.media_group_id);
+      if (!group) {
+        group = { items: [], caption: '', chatId: ctx.chat.id, started: false, timer: null };
+        pendingAlbums.set(m.media_group_id, group);
+      }
+      group.items.push(item);
+      if (raw) group.caption = raw;
+
+      if (dispatcher) {
+        if (!group.started) {
+          group.started = true;
+          dispatcher
+            .dispatch({ kind: 'album', groupId: m.media_group_id })
+            .catch((err) => log.error('could not stage album —', err.message));
+        }
+      } else {
+        clearTimeout(group.timer);
+        group.timer = setTimeout(() => {
+          flushAlbum(m.media_group_id).catch((err) =>
+            log.error('could not stage album —', err.message),
+          );
+        }, 1500);
+      }
+      return;
+    }
+
+    const { text, removed } = await cleanForChannel(raw);
+    await makePending(item ? [item] : [], text, removed, ctx.chat.id);
+  });
+
+  /** Post a staged forward to every destination, by file_id — no downloads. */
+  async function sendPending(id, ref) {
+    const edit = (text, extra = {}) =>
+      bot.api.editMessageText(ref.chatId, ref.messageId, text, extra).catch(() => {});
+
+    const rec = pendingStore.get(id);
+    if (!rec) return edit('🚫 That one expired — forward it again.');
+
+    const targets = destinations();
+    if (!targets.length) {
+      return edit('🚫 I have nowhere to post yet — add me to your channel first.');
+    }
+
+    const sent = [];
+    const failed = [];
+    for (const dest of targets) {
+      try {
+        const ids = [];
+        if (!rec.items.length) {
+          const msg = await bot.api.sendMessage(dest.id, rec.caption);
+          ids.push(msg.message_id);
+        } else if (rec.items.length === 1) {
+          const item = rec.items[0];
+          const method = { video: 'sendVideo', photo: 'sendPhoto', animation: 'sendAnimation', document: 'sendDocument' }[item.type];
+          const msg = await bot.api[method](dest.id, item.fileId, {
+            caption: rec.caption || undefined,
+          });
+          ids.push(msg.message_id);
+        } else {
+          const media = rec.items.slice(0, 10).map((item, index) => ({
+            // Albums only ever mix photos and videos.
+            type: item.type === 'photo' ? 'photo' : 'video',
+            media: item.fileId,
+            caption: index === 0 && rec.caption ? rec.caption : undefined,
+          }));
+          const msgs = await bot.api.sendMediaGroup(dest.id, media);
+          ids.push(...msgs.map((msg) => msg.message_id));
+        }
+        sent.push({ chatId: dest.id, title: dest.title, messageIds: ids });
+      } catch (err) {
+        failed.push({ title: dest.title, reason: err.description || err.message });
+        log.error(`forward-post to "${dest.title}" failed —`, err.description || err.message);
+      }
+    }
+
+    if (!sent.length) {
+      return edit(`🚫 Could not post: ${failed.map((f) => f.reason).join('; ')}`);
+    }
+
+    await pendingStore.remove(id);
+    const recordId = await store.add({
+      targets: sent.map((t) => ({ chatId: t.chatId, messageIds: t.messageIds })),
+      postedBy: ref.fromId,
+    });
+    const where = sent.length === 1 ? sent[0].title : `${sent.length} places`;
+    const warn = failed.length ? `\n⚠️ Failed: ${failed.map((f) => f.title).join(', ')}` : '';
+    await edit(`✅ Sent to ${where}.${warn}`, {
+      reply_markup: new InlineKeyboard().text(
+        sent.length === 1 ? '❌ Delete from channel' : '❌ Delete everywhere',
+        `del:${recordId}`,
+      ),
+    });
+  }
 
   /**
    * Set the watermark logo by sending the image to the bot.
@@ -422,6 +611,34 @@ async function main() {
 
   bot.on('callback_query:data', async (ctx) => {
     const data = ctx.callbackQuery.data || '';
+
+    if (data.startsWith('send:')) {
+      await ctx.answerCallbackQuery({ text: 'Sending…' });
+      const ref = {
+        chatId: ctx.chat.id,
+        messageId: ctx.callbackQuery.message.message_id,
+        fromId: ctx.from?.id,
+      };
+      const pendingId = data.slice(5);
+      if (dispatcher) {
+        // The sends must run inside a /work request on serverless — a callback
+        // handler's CPU is frozen the moment its response goes out.
+        dispatcher
+          .dispatch({ kind: 'pending', pendingId, ...ref })
+          .catch((err) => log.error('could not dispatch send —', err.message));
+      } else {
+        sendPending(pendingId, ref).catch((err) => log.error('send failed —', err.message));
+      }
+      return;
+    }
+
+    if (data.startsWith('x:')) {
+      await pendingStore.remove(data.slice(2));
+      await ctx.answerCallbackQuery({ text: 'Discarded.' });
+      await ctx.editMessageText('🗑 Discarded — nothing was posted.').catch(() => {});
+      return;
+    }
+
     if (!data.startsWith('del:')) return ctx.answerCallbackQuery();
 
     const record = store.get(data.slice(4));
@@ -507,7 +724,9 @@ async function main() {
       }
 
       await setStatus(ctx, statusId, '📤 Posting to the channel…');
-      const caption = buildCaption(result, config);
+      // Same hygiene as forwarded posts: no foreign links or tags survive, and
+      // the channel's own @tag goes on the end.
+      const { text: caption } = await cleanForChannel(buildCaption(result, config));
 
       const targets = destinations();
       const { sent, failed } = await broadcast(bot, config, { items: finished, caption }, targets);
@@ -616,7 +835,11 @@ async function main() {
 
     if (!urls.length) {
       if (text.startsWith('/')) return;
-      await ctx.reply("That doesn't look like an Instagram post link. Send a /reel/ or /p/ URL.");
+      // Only nag in the private chat. In a group the bot sees every message,
+      // and correcting each one would drown the room.
+      if (ctx.chat?.type === 'private') {
+        await ctx.reply("That doesn't look like an Instagram post link. Send a /reel/ or /p/ URL.");
+      }
       return;
     }
 
@@ -635,7 +858,7 @@ async function main() {
         // from /work (milliseconds), which proves the job's request is live
         // before we hand Telegram its response and lose the CPU.
         try {
-          await dispatcher.dispatch({ chatId: ctx.chat.id, fromId: ctx.from?.id, statusId, url });
+          await dispatcher.dispatch({ kind: 'url', chatId: ctx.chat.id, fromId: ctx.from?.id, statusId, url });
         } catch (err) {
           log.error('could not dispatch job —', err.message);
           await setStatus(ctx, statusId, `🚫 Could not start the job: ${err.message}`);
@@ -657,7 +880,19 @@ async function main() {
   const dispatcher = config.serverless
     ? createDispatcher({
         baseUrl: config.webhookUrl,
-        runJob: async ({ chatId, fromId, statusId, url }) => {
+        runJob: async (payload) => {
+          if (payload.kind === 'pending') {
+            await sendPending(payload.pendingId, payload);
+            return;
+          }
+          if (payload.kind === 'album') {
+            // Hold this request open while the album's sibling messages arrive
+            // on their own webhook requests, then stage the lot as one.
+            await new Promise((resolve) => setTimeout(resolve, 2500));
+            await flushAlbum(payload.groupId);
+            return;
+          }
+          const { chatId, fromId, statusId, url } = payload;
           const ctxLike = {
             api: bot.api,
             chat: { id: chatId },

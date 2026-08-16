@@ -16,6 +16,14 @@ echo "Instagram → Telegram reposter — Cloud Run deploy"
 echo "─────────────────────────────────────────────────"
 
 # ── the one thing only you know ─────────────────────────────────────────────
+# A redeploy shouldn't ask for it again: reuse the token the running service
+# already holds, and only prompt on a genuinely fresh install.
+if [ -z "${BOT_TOKEN:-}" ]; then
+  BOT_TOKEN=$(gcloud run services describe "$SERVICE" --region "$REGION" --format=json 2>/dev/null \
+    | jq -r '.spec.template.spec.containers[0].env[]? | select(.name=="BOT_TOKEN") | .value' 2>/dev/null || true)
+  [ "$BOT_TOKEN" = "null" ] && BOT_TOKEN=""
+  [ -n "$BOT_TOKEN" ] && echo "Reusing the token from the running service."
+fi
 if [ -z "${BOT_TOKEN:-}" ]; then
   read -r -p "Paste your bot token from @BotFather: " BOT_TOKEN
 fi

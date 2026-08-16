@@ -13,8 +13,8 @@ import { log } from './logger.js';
  * written once per post, read once per button tap.
  */
 export class PostStore {
-  constructor(dataDir, { keep = 500 } = {}) {
-    this.file = path.join(dataDir, 'posts.json');
+  constructor(dataDir, { keep = 500, filename = 'posts.json' } = {}) {
+    this.file = path.join(dataDir, filename);
     this.dataDir = dataDir;
     this.keep = keep;
     this.records = new Map();

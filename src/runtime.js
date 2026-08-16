@@ -76,12 +76,19 @@ export class RuntimeState {
   }
 
   /** @returns {boolean} false when this chat was already on the list. */
-  async addDestination({ id, title, type, addedBy }) {
+  async addDestination({ id, title, type, addedBy, username = '' }) {
     if (this.hasDestination(id)) return false;
-    this.state.destinations.push({ id, title, type, addedBy, addedAt: Date.now() });
+    this.state.destinations.push({ id, title, type, addedBy, username, addedAt: Date.now() });
     await this.#persist();
     log.info(`runtime: now posting to "${title}" (${id})`);
     return true;
+  }
+
+  async setDestinationUsername(chatId, username) {
+    const dest = this.state.destinations.find((d) => String(d.id) === String(chatId));
+    if (!dest || dest.username === username) return;
+    dest.username = username;
+    await this.#persist();
   }
 
   async removeDestination(chatId) {

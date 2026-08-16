@@ -157,6 +157,27 @@ The file-on-disk route still works: put a transparent PNG at `assets/watermark.p
 
 ---
 
+## Forwarding posts from other channels
+
+Forward any post into your chat with the bot and it stages a clean repost:
+
+- **The "Forwarded from" header is gone** — the bot re-sends the content as a fresh
+  post, so the channel sees a native one.
+- **The caption is scrubbed**: every link and every @tag that isn't your channel's is
+  removed, and your channel's @ is stamped on the end.
+- **Nothing posts until you tap 📤 Send to channel** on the preview. 🗑 Discard throws
+  it away. After sending you get the usual ❌ Delete button.
+
+Albums forward as albums. Any file size works — this path never downloads the media, it
+re-sends by reference, which is also why forwarded posts are **not watermarked**. A
+forwarded post whose caption contains an Instagram link goes down the full
+download-and-watermark pipeline instead.
+
+The same caption hygiene applies to Instagram reposts: foreign links and tags are
+cleaned out and your @ goes on the end.
+
+---
+
 ## Covering the original uploader's watermark
 
 On by default. Before watermarking, the bot looks for a burned-in watermark from whoever
@@ -302,6 +323,6 @@ tells you it went out unwatermarked rather than pretending it worked.
 | `scripts/doctor.js` | Pre-flight check |
 
 ```bash
-npm test    # 128 tests; the ffmpeg ones build real media and run the real filter graphs
+npm test    # 139 tests; the ffmpeg ones build real media and run the real filter graphs
 npm run doctor
 ```

@@ -44,7 +44,7 @@ async function serve(runJob) {
 test('dispatch resolves as soon as the job has provably started, not when it ends', async () => {
   let finished = false;
   const { dispatcher, jobs, close } = await serve(async () => {
-    await sleep(300);
+    await sleep(800);
     finished = true;
   });
   try {
@@ -52,13 +52,15 @@ test('dispatch resolves as soon as the job has provably started, not when it end
     await dispatcher.dispatch({ url: 'https://instagram.com/reel/X/', chatId: 1 });
     const elapsed = Date.now() - started;
 
-    assert.ok(elapsed < 200, `dispatch took ${elapsed}ms — it waited for the whole job`);
+    // Generous bound: under parallel test load the event loop can lag, and the
+    // claim being tested is "returns before the job ends", not "returns fast".
+    assert.ok(elapsed < 500, `dispatch took ${elapsed}ms — it waited for the whole job`);
     assert.equal(finished, false, 'the job must still be running when dispatch returns');
     assert.equal(jobs.length, 1);
     assert.equal(jobs[0].chatId, 1);
 
     // And the job does complete, held open by its own request.
-    await sleep(400);
+    await sleep(900);
     assert.equal(finished, true);
   } finally {
     await close();
