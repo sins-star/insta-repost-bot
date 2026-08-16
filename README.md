@@ -124,6 +124,28 @@ which is when they matter.
 
 ---
 
+## Auto-deploy: never open Google Cloud again
+
+Run once, in Cloud Shell:
+
+```bash
+./setup-autodeploy.sh
+```
+
+From then on **every push to `main` deploys itself** — GitHub runs the tests, then
+deploys to Cloud Run. Nothing to open, no commands, no terminal.
+
+It uses Workload Identity Federation rather than a service-account key, so there is no
+secret to copy into GitHub and none to leak later: Google is told to trust GitHub Actions
+runs *from this repository only*, and hands out short-lived credentials on the spot. The
+attribute condition pinning it to `sins-star/insta-repost-bot` is the security boundary —
+without it any repo on GitHub could mint credentials for the project.
+
+The deploy needs no bot token either: `deploy.sh` reuses the one the running service
+already holds.
+
+---
+
 ## Watermarks
 
 Set `WATERMARK_MODE` in `.env`:

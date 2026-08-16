@@ -1,0 +1,63 @@
+name: Deploy to Cloud Run
+
+# Every push to main ships itself. The owner runs nothing.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  workflow_dispatch:
+
+# Required for Workload Identity Federation: the job proves who it is with a
+# short-lived OIDC token rather than a stored key.
+permissions:
+  contents: read
+  id-token: write
+
+# A second push mid-deploy should not race the first one onto the service.
+concurrency:
+  group: deploy-cloud-run
+  cancel-in-progress: false
+
+env:
+  PROJECT_ID: gen-lang-client-0236878312
+  # Not secrets: a project number and a service account address are both
+  # discoverable, and neither grants anything without the trust binding that
+  # setup-autodeploy.sh scoped to this repository alone.
+  WIF_PROVIDER: projects/473030573487/locations/global/workloadIdentityPools/github/providers/github
+  DEPLOYER: github-deployer@gen-lang-client-0236878312.iam.gserviceaccount.com
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOYER }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy
+        run: |
+          gcloud config set project "$PROJECT_ID" --quiet
+          # deploy.sh reuses the bot token already held by the running service,
+          # so no secret is needed here at all.
+          ./deploy.sh

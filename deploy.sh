@@ -25,6 +25,13 @@ if [ -z "${BOT_TOKEN:-}" ]; then
   [ -n "$BOT_TOKEN" ] && echo "Reusing the token from the running service."
 fi
 if [ -z "${BOT_TOKEN:-}" ]; then
+  # No terminal to ask at — this is CI. Fail with the reason rather than
+  # hanging forever on a prompt nobody can see.
+  if [ ! -t 0 ]; then
+    echo "✖ No BOT_TOKEN, and no running service to reuse one from."
+    echo "  Deploy once by hand first, or set BOT_TOKEN in the environment."
+    exit 1
+  fi
   read -r -p "Paste your bot token from @BotFather: " BOT_TOKEN
 fi
 if ! printf '%s' "$BOT_TOKEN" | grep -Eq '^[0-9]{5,}:[A-Za-z0-9_-]{20,}$'; then
