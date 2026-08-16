@@ -56,6 +56,17 @@ fi
 
 PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
 
+# Newer Google projects (AI-Studio-created ones especially) do not grant the
+# build robot the right to read the source it is asked to build, so the deploy
+# dies with PERMISSION_DENIED before anything happens. Granting the standard
+# builder role is Google's documented fix; harmless when already granted.
+echo "Making sure the build robot may read your code…"
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+  --role="roles/cloudbuild.builds.builder" \
+  --condition=None --quiet >/dev/null 2>&1 \
+  || echo "  note: could not pre-grant build permissions — continuing anyway"
+
 # ── the bot's permanent memory: owner, channels, logo, delete-buttons ────────
 BUCKET="${PROJECT_ID}-repost-data"
 gcloud storage buckets create "gs://${BUCKET}" --location="$REGION" \
