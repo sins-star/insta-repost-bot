@@ -23,9 +23,23 @@ echo "────────────────────────�
 
 ACTIVE=$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null | head -1)
 if [ -z "$ACTIVE" ]; then
-  echo "✖ No active Google account in this shell. Run:  gcloud auth login"
+  # Cloud Shell issues credentials on demand: the first gcloud command that
+  # actually calls an API pops an "Authorize Cloud Shell" dialog. `gcloud auth
+  # list` reads a local file and calls nothing, so it never triggers that — it
+  # just reports "no account" and looks like a dead end. Ask for something real.
+  echo "This shell has no credentials yet — asking Cloud Shell for them."
+  echo "👉 If a dialog appears, tap AUTHORIZE."
+  echo ""
+  gcloud projects list --limit=1 >/dev/null 2>&1 || true
+  ACTIVE=$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null | head -1)
+fi
+if [ -z "$ACTIVE" ]; then
+  echo "✖ Still no active Google account in this shell."
+  echo "  Close this tab, open https://shell.cloud.google.com fresh (not in"
+  echo "  EPHEMERAL mode), and run the install line again."
   exit 1
 fi
+echo "Account: $ACTIVE"
 
 # An ephemeral Cloud Shell — or any freshly reset one — starts with no project
 # selected, and `gcloud projects describe ""` then fails with a message that

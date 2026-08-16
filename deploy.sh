@@ -46,6 +46,14 @@ fi
 # something else entirely — the services call reports it as a billing problem.
 ACTIVE=$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null | head -1)
 if [ -z "$ACTIVE" ]; then
+  # Cloud Shell issues credentials on demand, and only a command that really
+  # calls an API pops the "Authorize" dialog. `gcloud auth list` reads a local
+  # file, so on its own it reports "no account" forever. Ask for something real
+  # before concluding anything is wrong.
+  gcloud projects list --limit=1 >/dev/null 2>&1 || true
+  ACTIVE=$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null | head -1)
+fi
+if [ -z "$ACTIVE" ]; then
   KNOWN=$(gcloud auth list --format='value(account)' 2>/dev/null | head -1)
   echo ""
   echo "✖ This shell has no active Google account — it is not a billing problem."
