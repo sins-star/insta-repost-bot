@@ -9,7 +9,7 @@ import { loadConfig, ConfigError } from './config.js';
 import { log, redactSecret } from './logger.js';
 import { findInstagramUrls, download, buildCaption, DownloadError } from './instagram.js';
 import { applyWatermark, ensureUnderLimit } from './watermark.js';
-import { postToChannel, deletePost } from './poster.js';
+import { broadcast, deletePost } from './poster.js';
 import { Queue } from './queue.js';
 import { PostStore } from './store.js';
 import { RuntimeState } from './runtime.js';
@@ -101,6 +101,19 @@ async function main() {
     if (config.watermark.mode === 'text') config.watermark.mode = 'logo';
   }
 
+  /**
+   * Everywhere the bot posts. An explicit CHANNEL_ID from the environment is
+   * treated as a permanent destination; the rest are ones the owner added the
+   * bot to, remembered across restarts.
+   */
+  const destinations = () => {
+    const list = runtime.destinations.map((d) => ({ id: d.id, title: d.title }));
+    if (config.channelId && !runtime.hasDestination(config.channelId)) {
+      list.unshift({ id: config.channelId, title: String(config.channelId) });
+    }
+    return list;
+  };
+
   const store = new PostStore(config.dataDir);
   await store.load();
   const queue = new Queue({ limit: config.queueLimit });
@@ -166,44 +179,83 @@ async function main() {
     await runtime.claim(userId);
     config.adminIds = runtime.adminIds;
     await ctx.reply(
-      '✅ You own this bot now.\n\n' +
-        'Next: add me to your channel as an admin with “Post messages” — I will ' +
-        'notice and start posting there.\n\n' +
+      '✅ You own this bot now. Only you can add me anywhere.\n\n' +
+        'Next: add me to any channel or group you want to post to — I notice ' +
+        'automatically, and I post to all of them at once.\n\n' +
         'Then send me your logo as a FILE and I will use it as the watermark.',
     );
   });
 
   /**
-   * Learn the channel by being added to it.
+   * Learn where to post by being added there.
    *
-   * Telegram tells the bot when its own membership changes, and that update
-   * carries the chat id — the exact number someone would otherwise have to go
-   * and look up. Registered ahead of the admin gate because this can legitimately
-   * arrive before anyone has claimed the bot.
+   * Telegram sends an update whenever the bot's own membership changes, and it
+   * carries both the chat id and WHO changed it. That second part is what makes
+   * "only I can add it" enforceable: anyone else who adds the bot gets it back
+   * out again immediately.
+   *
+   * Registered ahead of the admin gate because this legitimately arrives before
+   * anyone has claimed the bot.
    */
   bot.on('my_chat_member', async (ctx) => {
     const update = ctx.myChatMember;
     const chat = update.chat;
     const status = update.new_chat_member?.status;
+    const actor = update.from?.id;
+    const name = chat.title || chat.username || String(chat.id);
 
-    if (chat.type !== 'channel' || status !== 'administrator') return;
-    const name = chat.title || chat.username || chat.id;
+    if (!['channel', 'group', 'supergroup'].includes(chat.type)) return;
 
-    if (config.channelId && String(config.channelId) !== String(chat.id)) {
-      log.warn(`added to "${name}" but already posting to ${config.channelId} — ignoring`);
+    // Removed, or demoted below what posting needs.
+    if (['left', 'kicked', 'restricted'].includes(status)) {
+      if (await runtime.removeDestination(chat.id)) {
+        log.info(`removed from "${name}" — no longer posting there`);
+      }
       return;
     }
-    if (config.channelId) return;
 
-    await runtime.setChannel(chat.id);
-    config.channelId = chat.id;
-    log.info(`adopted channel "${name}" (${chat.id})`);
+    // A channel needs admin rights to post at all; in a group, membership is enough.
+    const canPost = chat.type === 'channel' ? status === 'administrator' : ['administrator', 'member'].includes(status);
+    if (!canPost) return;
 
-    const message =
-      `✅ I can post to <b>${name}</b> now.\n\n` +
-      'Paste an Instagram link and it goes straight there.';
+    // The gate. Once the bot has an owner, only the owner may place it anywhere.
+    if (config.adminIds.length && !config.adminIds.includes(actor)) {
+      log.warn(`${actor} tried to add the bot to "${name}" — leaving`);
+      try {
+        await ctx.api.leaveChat(chat.id);
+      } catch (err) {
+        log.error(`could not leave "${name}" —`, err.description || err.message);
+      }
+      for (const adminId of config.adminIds) {
+        await ctx.api
+          .sendMessage(
+            adminId,
+            `🚫 Someone tried to add me to <b>${name}</b>. I left — only you can add me anywhere.`,
+            { parse_mode: 'HTML' },
+          )
+          .catch(() => {});
+      }
+      return;
+    }
+
+    const added = await runtime.addDestination({
+      id: chat.id,
+      title: name,
+      type: chat.type,
+      addedBy: actor,
+    });
+    if (!added) return;
+
+    // Keep the legacy single-channel field in step, so anything still reading
+    // config.channelId behaves.
+    if (!config.channelId) config.channelId = chat.id;
+
+    const total = destinations().length;
+    const where = total === 1 ? '' : ` — that's ${total} places now`;
     for (const adminId of config.adminIds) {
-      await ctx.api.sendMessage(adminId, message, { parse_mode: 'HTML' }).catch(() => {});
+      await ctx.api
+        .sendMessage(adminId, `✅ I'll post to <b>${name}</b>${where}.`, { parse_mode: 'HTML' })
+        .catch(() => {});
     }
   });
 
@@ -229,7 +281,7 @@ async function main() {
     'and post it to the channel. Multiple links in one message all get queued.\n\n' +
     '<b>Setting me up</b>\n' +
     '1. /claim — become my owner\n' +
-    '2. Add me to your channel as an admin with “Post messages”\n' +
+    '2. Add me to any channel or group — I post to all of them at once\n' +
     '3. Send me your logo <i>as a file</i> and I will use it as the watermark\n\n' +
     'Send a new logo any time to replace it.\n\n' +
     '/status — queue, uptime and settings\n' +
@@ -249,7 +301,9 @@ async function main() {
     return ctx.reply(
       [
         `Up ${uptime()} · mode ${config.mode}`,
-        `Channel: ${config.channelId || 'not set — add me to one as admin'}`,
+        destinations().length
+          ? `Posting to: ${destinations().map((d) => d.title).join(', ')}`
+          : 'Posting to: nowhere yet — add me to a channel or group',
         `Queue: ${queue.size} waiting · ${queue.completed} posted · ${queue.failed} failed`,
         `Watermark: ${detail}`,
         `Cover existing: ${
@@ -373,11 +427,15 @@ async function main() {
       });
     }
 
-    const { deleted, total, errors } = await deletePost(bot, record.chatId, record.messageIds);
+    // Posts recorded before multi-destination support used a single chatId.
+    const targets = record.targets || [{ chatId: record.chatId, messageIds: record.messageIds }];
+
+    const { deleted, total, errors } = await deletePost(bot, targets);
     if (deleted === total) {
       await store.remove(data.slice(4));
-      await ctx.answerCallbackQuery({ text: 'Deleted from the channel.' });
-      await ctx.editMessageText('🗑 Deleted from the channel.');
+      const where = targets.length === 1 ? 'the channel' : `all ${targets.length} places`;
+      await ctx.answerCallbackQuery({ text: 'Deleted.' });
+      await ctx.editMessageText(`🗑 Deleted from ${where}.`);
       return;
     }
     log.warn('partial delete', errors.join('; '));
@@ -390,10 +448,10 @@ async function main() {
   });
 
   async function runJob(ctx, url, statusId) {
-    if (!config.channelId) {
+    if (!destinations().length) {
       throw new Error(
-        'I have no channel to post to yet. Add me to your channel as an admin ' +
-          'with “Post messages” and I will pick it up automatically.',
+        'I have nowhere to post yet. Add me to a channel or group and I will ' +
+          'pick it up automatically — only you can add me.',
       );
     }
 
@@ -446,39 +504,17 @@ async function main() {
       await setStatus(ctx, statusId, '📤 Posting to the channel…');
       const caption = buildCaption(result, config);
 
-      let messageIds;
-      try {
-        messageIds = await postToChannel(bot, config, { items: finished, caption });
-      } catch (err) {
-        // Part of a multi-group album may already be live. Record what did post
-        // so the Delete button can still take it down.
-        const partial = err.partialMessageIds || [];
-        if (!partial.length) throw err;
+      const targets = destinations();
+      const { sent, failed } = await broadcast(bot, config, { items: finished, caption }, targets);
 
-        const partialId = await store.add({
-          chatId: config.channelId,
-          messageIds: partial,
-          url,
-          postedBy: ctx.from?.id,
-        });
-        await setStatus(
-          ctx,
-          statusId,
-          `🚫 Posting failed part-way: ${err.message}\n\n` +
-            `⚠️ ${partial.length} item(s) are already live in the channel.`,
-          {
-            reply_markup: new InlineKeyboard().text(
-              '❌ Delete what posted',
-              `del:${partialId}`,
-            ),
-          },
+      if (!sent.length) {
+        throw new Error(
+          `Could not post anywhere. ${failed.map((f) => `${f.title}: ${f.reason}`).join('; ')}`,
         );
-        return;
       }
 
       const recordId = await store.add({
-        chatId: config.channelId,
-        messageIds,
+        targets: sent.map((t) => ({ chatId: t.chatId, messageIds: t.messageIds })),
         url,
         postedBy: ctx.from?.id,
       });
@@ -496,14 +532,22 @@ async function main() {
       if (shrunk) {
         notes.push(`ℹ️ ${shrunk} item(s) re-encoded smaller to fit Telegram's ${config.uploadLimitMb}MB limit.`);
       }
-      const warning = notes.length ? `\n${notes.join('\n')}` : '';
-      await setStatus(
-        ctx,
-        statusId,
-        `✅ Posted to the channel${label}.${warning}`,
-        { reply_markup: new InlineKeyboard().text('❌ Delete from channel', `del:${recordId}`) },
-      );
-      log.info(`posted ${messageIds.length} message(s) for ${url}`);
+      if (failed.length) {
+        notes.push(
+          `⚠️ Could not post to ${failed.map((f) => f.title).join(', ')}.`,
+        );
+      }
+      const warningText = notes.length ? `\n${notes.join('\n')}` : '';
+      const where =
+        sent.length === 1 ? sent[0].title : `${sent.length} places`;
+
+      await setStatus(ctx, statusId, `✅ Posted to ${where}${label}.${warningText}`, {
+        reply_markup: new InlineKeyboard().text(
+          sent.length === 1 ? '❌ Delete from channel' : '❌ Delete everywhere',
+          `del:${recordId}`,
+        ),
+      });
+      log.info(`posted to ${sent.length} destination(s) for ${url}`);
     } finally {
       await fs.rm(workDir, { recursive: true, force: true }).catch((err) => {
         log.warn('temp cleanup failed —', err.message);
@@ -671,7 +715,7 @@ async function main() {
   // and blocking the start of polling on a diagnostic would mean the bot is not
   // accepting links while it works out how to tell you something is wrong.
   const reportProblems = async () => {
-    const problems = await selfCheck(config, bot);
+    const problems = await selfCheck(config, bot, destinations());
     if (!problems.length) {
       log.info('self-check: all good');
       return;

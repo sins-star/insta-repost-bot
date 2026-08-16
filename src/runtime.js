@@ -18,7 +18,14 @@ export class RuntimeState {
   constructor(dataDir) {
     this.dataDir = dataDir;
     this.file = path.join(dataDir, 'runtime.json');
-    this.state = { adminIds: [], channelId: null, logoPath: null, claimedAt: null };
+    this.state = {
+      adminIds: [],
+      channelId: null,
+      logoPath: null,
+      claimedAt: null,
+      /** Every group and channel the owner has added the bot to. */
+      destinations: [],
+    };
     this.writing = Promise.resolve();
   }
 
@@ -57,6 +64,34 @@ export class RuntimeState {
     this.state.claimedAt = Date.now();
     await this.#persist();
     log.info(`runtime: claimed by ${userId}`);
+    return true;
+  }
+
+  get destinations() {
+    return this.state.destinations;
+  }
+
+  hasDestination(chatId) {
+    return this.state.destinations.some((d) => String(d.id) === String(chatId));
+  }
+
+  /** @returns {boolean} false when this chat was already on the list. */
+  async addDestination({ id, title, type, addedBy }) {
+    if (this.hasDestination(id)) return false;
+    this.state.destinations.push({ id, title, type, addedBy, addedAt: Date.now() });
+    await this.#persist();
+    log.info(`runtime: now posting to "${title}" (${id})`);
+    return true;
+  }
+
+  async removeDestination(chatId) {
+    const before = this.state.destinations.length;
+    this.state.destinations = this.state.destinations.filter(
+      (d) => String(d.id) !== String(chatId),
+    );
+    if (this.state.destinations.length === before) return false;
+    await this.#persist();
+    log.info(`runtime: no longer posting to ${chatId}`);
     return true;
   }
 

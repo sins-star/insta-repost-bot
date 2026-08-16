@@ -31,13 +31,19 @@ Message your new bot and send `/claim`. You are now its owner, permanently.
 Claiming only works while the bot has no owner, and only in the first hour after it starts.
 Set `ALLOW_CLAIM=false` and fill in `ADMIN_IDS` by hand if you would rather not rely on that.
 
-### 3. Add it to your channel
+### 3. Add it wherever you want to post
 
 Your channel → **Manage channel** → **Administrators** → **Add admin** → your bot → turn on
-**Post messages** → save.
+**Post messages** → save. Groups work too — just add the bot to the group.
 
-Telegram tells the bot it was added, so it works out the channel id by itself and messages you
-to confirm. Nothing to look up.
+Telegram tells the bot it was added, so it works out the chat id by itself and messages you to
+confirm. Nothing to look up.
+
+**Add it to as many places as you like.** One pasted link goes to all of them at once, and the
+Delete button takes it back down from all of them together.
+
+**Only you can do this.** The bot checks who added it against its owner. Anyone else, and it
+leaves the chat immediately and tells you it happened.
 
 ### 4. Send it your logo
 
@@ -157,6 +163,8 @@ only true if you know what it does on its own.
 | **The disk fills up** | Sweeps files left behind by jobs killed mid-encode, hourly and before any download that finds space short. |
 | **Telegram rate-limits or hiccups** | Waits out the flood limit and retries instead of losing the post. |
 | **A watermark won't render** | Posts the clip anyway and tells you it went out unwatermarked. |
+| **One destination goes bad** | Posts to the rest anyway and names the one that failed, rather than losing the post. |
+| **Someone adds the bot somewhere** | Leaves that chat straight away and tells you — only the owner can place it. |
 | **The process crashes** | Exits cleanly so Docker restarts it (`restart: unless-stopped`), rather than dying quietly. |
 | **The video is too big** | Re-encodes smaller to fit Telegram's 50MB ceiling. |
 
@@ -258,6 +266,6 @@ tells you it went out unwatermarked rather than pretending it worked.
 | `scripts/doctor.js` | Pre-flight check |
 
 ```bash
-npm test    # 117 tests; the ffmpeg ones build real media and run the real filter graphs
+npm test    # 124 tests; the ffmpeg ones build real media and run the real filter graphs
 npm run doctor
 ```

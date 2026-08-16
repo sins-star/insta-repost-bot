@@ -201,18 +201,18 @@ export function startMaintenance(config, { exclusive = (fn) => fn() } = {}) {
  * Returned rather than logged so the caller can put it in front of a human —
  * on an unattended box, a warning in the log is a warning nobody reads.
  */
-export async function selfCheck(config, bot) {
+export async function selfCheck(config, bot, destinations = []) {
   const problems = [];
 
-  // No channel yet is a normal state on a fresh install, not a fault: the bot
-  // adopts one the moment it is added to it as an admin.
-  if (config.channelId) {
+  // Nowhere to post yet is a normal state on a fresh install, not a fault: the
+  // bot picks places up as its owner adds it to them.
+  for (const dest of destinations) {
     try {
-      await bot.api.getChat(config.channelId);
+      await bot.api.getChat(dest.id);
     } catch (err) {
       problems.push(
-        `Cannot see the channel ${config.channelId} — ${err.description || err.message}. ` +
-          'Add the bot to the channel as an admin with "Post messages".',
+        `Cannot see "${dest.title}" — ${err.description || err.message}. ` +
+          'Check the bot is still an admin there with "Post messages".',
       );
     }
   }

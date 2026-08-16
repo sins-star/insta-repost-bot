@@ -112,6 +112,34 @@ async function videoMeta(item, config) {
  * @returns {Promise<number[]>} the channel message ids, in order, so the
  * Delete button can take the whole post down including every album item.
  */
+/**
+ * Send one post to every destination.
+ *
+ * Each destination is independent: a group the bot was demoted in must not stop
+ * the post reaching the others. So failures are collected rather than thrown,
+ * and the caller reports which places worked.
+ *
+ * @returns {Promise<{sent: Array, failed: Array}>}
+ */
+export async function broadcast(bot, config, { items, caption }, destinations) {
+  const sent = [];
+  const failed = [];
+
+  for (const dest of destinations) {
+    try {
+      const messageIds = await postToChannel(bot, { ...config, channelId: dest.id }, { items, caption });
+      sent.push({ chatId: dest.id, title: dest.title, messageIds });
+    } catch (err) {
+      const partial = err.partialMessageIds || [];
+      if (partial.length) sent.push({ chatId: dest.id, title: dest.title, messageIds: partial });
+      failed.push({ chatId: dest.id, title: dest.title, reason: err.description || err.message });
+      log.error(`could not post to "${dest.title}" —`, err.description || err.message);
+    }
+  }
+
+  return { sent, failed };
+}
+
 export async function postToChannel(bot, config, { items, caption }) {
   const target = config.channelId;
 
@@ -180,16 +208,21 @@ export async function postToChannel(bot, config, { items, caption }) {
  * to delete a channel message older than 48 hours, and the admin needs to know
  * that is why the button did nothing.
  */
-export async function deletePost(bot, chatId, messageIds) {
+export async function deletePost(bot, targets) {
   let deleted = 0;
+  let total = 0;
   const errors = [];
-  for (const id of messageIds) {
-    try {
-      await bot.api.deleteMessage(chatId, id);
-      deleted += 1;
-    } catch (err) {
-      errors.push(err.description || err.message);
+
+  for (const { chatId, messageIds } of targets) {
+    for (const id of messageIds) {
+      total += 1;
+      try {
+        await bot.api.deleteMessage(chatId, id);
+        deleted += 1;
+      } catch (err) {
+        errors.push(err.description || err.message);
+      }
     }
   }
-  return { deleted, total: messageIds.length, errors };
+  return { deleted, total, errors };
 }
