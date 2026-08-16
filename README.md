@@ -132,17 +132,26 @@ One line, into any shell, from any directory:
 bash <(curl -sL https://raw.githubusercontent.com/sins-star/insta-repost-bot/main/b)
 ```
 
-**On a phone, type this instead** — 36 characters, and every symbol in it is on the
-first symbol layer of the iOS keyboard, so there is no hunting through `#+=`:
+**On a phone, type this instead** — 32 characters, one capital letter, and every symbol
+in it is on the first symbol layer of the iOS keyboard, so there is no hunting through
+`#+=`:
 
 ```bash
-curl -fsLo b tinyurl.com/sinsgo;bash b
+curl -fsLo b da.gd/sinsgo;bash b
 ```
 
-`tinyurl.com/sinsgo` is a short link to that same `b` in this repo. It exists because
-iOS Safari cannot paste into Cloud Shell at all — the terminal is a canvas, not a text
-field, so the paste menu never appears and the only way in is by hand. Length is
-therefore a real constraint, not a nicety.
+`da.gd/sinsgo` is a short link to that same `b` in this repo (`tinyurl.com/sinsgo` is an
+equivalent, longer one). Watch for iOS auto-capitalising the leading `curl`.
+
+Length is a real constraint here, not a nicety: **iOS Safari cannot paste into Cloud
+Shell at all** — the terminal is a canvas rather than a text field, so the paste menu
+never appears and every character has to be typed by hand.
+
+**The Cloud Run console's "Set up continuous deployment" wizard is not an alternative on
+a phone.** That button lives in an action bar the console hides below a certain viewport
+width, and Safari's "Request Desktop Website" does not bring it back — the console picks
+its layout from screen width, not from the user-agent string. Checked on an iPhone,
+2026-08-16.
 
 That clones the repo if it isn't there, updates it if it is, sets up auto-deploy the
 first time, and deploys. It exists because `./go` assumes you are already standing
