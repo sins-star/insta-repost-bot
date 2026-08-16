@@ -126,11 +126,15 @@ which is when they matter.
 
 ## Auto-deploy: never open Google Cloud again
 
-Run once, in Cloud Shell:
+In Cloud Shell, four keystrokes:
 
 ```bash
-./setup-autodeploy.sh
+./go
 ```
+
+That pulls the latest code, sets up auto-deploy the first time it runs, and deploys.
+Short on purpose: Cloud Shell on a phone will not paste, so every character has to be
+typed by hand.
 
 From then on **every push to `main` deploys itself** — GitHub runs the tests, then
 deploys to Cloud Run. Nothing to open, no commands, no terminal.
