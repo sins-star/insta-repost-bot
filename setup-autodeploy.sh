@@ -27,7 +27,24 @@ if [ -z "$ACTIVE" ]; then
   exit 1
 fi
 
-PROJECT_ID=$(gcloud config get-value project 2>/dev/null)
+# An ephemeral Cloud Shell — or any freshly reset one — starts with no project
+# selected, and `gcloud projects describe ""` then fails with a message that
+# says nothing about the real cause. Resolve it the way deploy.sh already does.
+PROJECT_ID=$(gcloud config get-value project 2>/dev/null || true)
+if [ -z "$PROJECT_ID" ] || [ "$PROJECT_ID" = "(unset)" ]; then
+  mapfile -t PROJECTS < <(gcloud projects list --format='value(projectId)' 2>/dev/null)
+  if [ "${#PROJECTS[@]}" -eq 1 ]; then
+    PROJECT_ID="${PROJECTS[0]}"
+    gcloud config set project "$PROJECT_ID" --quiet >/dev/null
+  elif [ "${#PROJECTS[@]}" -eq 0 ]; then
+    echo "✖ No Google Cloud project is visible to this account."
+    exit 1
+  else
+    echo "More than one project — pick the one to deploy into:"
+    select PROJECT_ID in "${PROJECTS[@]}"; do [ -n "$PROJECT_ID" ] && break; done
+    gcloud config set project "$PROJECT_ID" --quiet >/dev/null
+  fi
+fi
 PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
 SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 
