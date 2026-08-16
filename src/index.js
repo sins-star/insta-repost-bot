@@ -796,10 +796,21 @@ async function main() {
 
   if (config.mode === 'webhook') {
     const url = `${config.webhookUrl.replace(/\/+$/, '')}${webhookPath}`;
-    await bot.api.setWebhook(url, {
-      secret_token: config.webhookSecret || undefined,
-      drop_pending_updates: true,
-    });
+    log.info(`registering webhook at ${url}`);
+    try {
+      await bot.api.setWebhook(url, {
+        secret_token: config.webhookSecret || undefined,
+        drop_pending_updates: true,
+      });
+    } catch (err) {
+      // Without a webhook the bot is unreachable and LOOKS deployed — the
+      // single worst silent failure this service has. Say exactly what was
+      // attempted and die loudly so the logs carry the whole story.
+      log.error(
+        `could not register the webhook at ${url} — ${err.description || err.message}`,
+      );
+      process.exit(1);
+    }
     log.info(`webhook registered (@${bot.botInfo.username})`);
   } else {
     await bot.api.deleteWebhook({ drop_pending_updates: true }).catch(() => {});

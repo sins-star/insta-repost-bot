@@ -85,8 +85,37 @@ if [ -n "$ACTUAL" ] && [ "$ACTUAL" != "$URL" ]; then
     --update-env-vars "WEBHOOK_URL=${ACTUAL}" --quiet
 fi
 
+EXPECT="${ACTUAL:-$URL}"
 echo ""
-echo "✅ Deployed. Now open Telegram and message your bot:"
+echo "Deployed — now VERIFYING the bot actually came up…"
+VERIFIED=""
+for i in $(seq 1 12); do
+  HOOK=$(curl -s -m 10 "https://api.telegram.org/bot${BOT_TOKEN}/getWebhookInfo" \
+    | grep -o '"url":"[^"]*"' | head -1 | cut -d'"' -f4)
+  if [ -n "$HOOK" ] && [[ "$HOOK" == "$EXPECT"* ]]; then
+    VERIFIED=1
+    break
+  fi
+  # Poke the service: a revision that crashed after passing its readiness
+  # check only shows itself when something makes it boot again.
+  curl -s -m 15 "$EXPECT/health" >/dev/null 2>&1 || true
+  sleep 5
+done
+
+if [ -z "$VERIFIED" ]; then
+  echo ""
+  echo "✖ The container deployed, but the bot never announced itself to Telegram."
+  echo "  Its own logs explain why — last 30 lines:"
+  echo ""
+  gcloud run services logs read "$SERVICE" --region "$REGION" --limit 30 2>/dev/null | tail -30
+  echo ""
+  echo "Screenshot everything above."
+  exit 1
+fi
+
+echo ""
+echo "✅ Deployed AND verified — Telegram confirms it is delivering to this bot."
+echo "Now open Telegram and message your bot:"
 echo ""
 echo "   1. /claim              — you become its owner, permanently"
 echo "   2. add it to your channel as an admin (Post messages on)"
