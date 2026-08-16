@@ -109,8 +109,19 @@ export function loadConfig(source = process.env) {
 
     const config = {
       botToken: req('BOT_TOKEN'),
-      channelId: parseChannel(req('CHANNEL_ID')),
-      adminIds: parseAdminIds(req('ADMIN_IDS')),
+      // Both optional. Left unset, the bot discovers them: the first person to
+      // send /claim becomes the owner, and the channel is learned when the bot
+      // is added to one as an admin. Set, they are validated as strictly as
+      // ever — a typo should still fail at boot rather than at post time.
+      channelId: str('CHANNEL_ID', '') ? parseChannel(str('CHANNEL_ID', '')) : null,
+      adminIds: str('ADMIN_IDS', '') ? parseAdminIds(str('ADMIN_IDS', '')) : [],
+
+      // Whether an unclaimed bot may be claimed by its first user, and for how
+      // long after startup. The window is the safety: the username is one you
+      // invented and never published, so someone would have to guess it AND
+      // beat you to it inside the hour.
+      allowClaim: bool('ALLOW_CLAIM', true),
+      claimWindowMin: num('CLAIM_WINDOW_MIN', 60, { min: 1, max: 10080, integer: true }),
 
       mode,
       // Point this at a self-hosted tdlib/telegram-bot-api server to lift the
@@ -191,13 +202,29 @@ export function loadConfig(source = process.env) {
       queueLimit: num('QUEUE_LIMIT', 20, { min: 1, max: 500, integer: true }),
     };
 
+    // The one combination that can never work: nobody configured and nobody
+    // able to claim it means the bot would ignore every message forever.
+    if (!config.adminIds.length && !config.allowClaim) {
+      throw new ConfigError(
+        'ADMIN_IDS is empty and ALLOW_CLAIM is false, so nobody could ever use this bot. ' +
+          'Either set ADMIN_IDS, or leave ALLOW_CLAIM on and send /claim to the bot.',
+      );
+    }
     if (config.mode === 'webhook' && !config.webhookUrl) {
       throw new ConfigError('MODE=webhook requires WEBHOOK_URL (the public https URL of this bot)');
     }
     if (needsText(config) && !config.watermark.text) {
-      throw new ConfigError(
-        `WATERMARK_MODE=${config.watermark.mode} requires WATERMARK_TEXT (e.g. "@yourchannel")`,
-      );
+      // Asked for explicitly with nothing to draw — that is a mistake worth
+      // stopping for. But `text` is also the DEFAULT, and a first run may have
+      // supplied nothing but a token, with the logo arriving later in chat. In
+      // that case start with no watermark rather than refusing to run.
+      if (env.WATERMARK_MODE) {
+        throw new ConfigError(
+          `WATERMARK_MODE=${config.watermark.mode} requires WATERMARK_TEXT (e.g. "@yourchannel")`,
+        );
+      }
+      config.watermark.mode = 'none';
+      config.watermark.defaultedToNone = true;
     }
     if (needsLogo(config) && !fs.existsSync(config.watermark.logoPath)) {
       throw new ConfigError(

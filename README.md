@@ -8,55 +8,54 @@ Carousels work: a 7-photo post goes out as one album.
 
 ---
 
-## Setup — about 10 minutes
+## Setup — about 5 minutes
+
+The bot configures itself. You need one value to start it; everything else it
+learns from you using it.
 
 ### 1. Make the bot
 
 In Telegram, message **[@BotFather](https://t.me/BotFather)** → `/newbot` → pick a name and a
-username. It replies with a token like `8123456789:AAH...`. That's `BOT_TOKEN`.
-
-### 2. Let it post to your channel
-
-Open your channel → **Manage channel** → **Administrators** → **Add admin** → search your
-bot's username → grant **Post messages** (the rest can stay off) → save.
-
-If your channel is public, `CHANNEL_ID` is `@yourchannelname`. If it's private, forward any
-message from the channel to [@userinfobot](https://t.me/userinfobot) and use the `-100…`
-number it gives you.
-
-### 3. Find your own id
-
-Start a chat with your new bot and send `/whoami`. It replies with your numeric id — that's
-`ADMIN_IDS`. This command deliberately works before you're an admin, because otherwise you'd
-need the number to get the number.
-
-### 4. Fill in the config
+username. It replies with a token like `8123456789:AAH...`. That's `BOT_TOKEN` — the only
+thing you have to put in a config file.
 
 ```bash
-cp .env.example .env
-# then edit .env — BOT_TOKEN, CHANNEL_ID and ADMIN_IDS are the only required ones
+cp .env.example .env      # paste the token into BOT_TOKEN
+docker compose up -d --build
 ```
 
-### 5. Check it before you run it
+### 2. Claim it
+
+Message your new bot and send `/claim`. You are now its owner, permanently.
+
+Claiming only works while the bot has no owner, and only in the first hour after it starts.
+Set `ALLOW_CLAIM=false` and fill in `ADMIN_IDS` by hand if you would rather not rely on that.
+
+### 3. Add it to your channel
+
+Your channel → **Manage channel** → **Administrators** → **Add admin** → your bot → turn on
+**Post messages** → save.
+
+Telegram tells the bot it was added, so it works out the channel id by itself and messages you
+to confirm. Nothing to look up.
+
+### 4. Send it your logo
+
+Send the image to the bot **as a file**, not as a photo — Telegram re-encodes photos to JPEG
+and throws away transparency. It saves it, switches the watermark on, and tells you the size.
+
+Send a new one any time to replace it. If the image has no transparency, the bot notices and
+switches on the setting that knocks its background out.
+
+That's it. Paste an Instagram link.
+
+### Checking it over
 
 ```bash
-npm install
-npm run doctor
+npm run doctor    # token, channel, ffmpeg, yt-dlp, fonts, disk
 ```
 
-`doctor` verifies the token, that the bot can actually see the channel, that ffmpeg and
-yt-dlp are present, and that the watermark font and logo exist. It's much faster than
-finding out from a failed post.
-
-### 6. Run it
-
-```bash
-docker compose up -d --build     # recommended
-# or, with ffmpeg + yt-dlp already installed locally:
-npm start
-```
-
-Paste a reel link. It should post within a few seconds.
+Send `/status` to the bot for the same picture from your phone.
 
 ---
 
@@ -99,13 +98,20 @@ Everything else is tunable: `WATERMARK_POSITION` (`tl` `tr` `bl` `br` `center`),
 `WATERMARK_OPACITY`, `WATERMARK_SCALE` (logo width as a share of the video width),
 `WATERMARK_TEXT_SCALE`, and `WATERMARK_MARGIN`.
 
-To use a logo, drop a **transparent PNG** at `assets/watermark.png` and set
-`WATERMARK_MODE=logo`. The folder is mounted into the container, so swapping the file and
-restarting is enough — no rebuild.
+**The easy way to set a logo is to send it to the bot in chat, as a file.** It saves it to the
+data volume, switches `WATERMARK_MODE` to `logo`, and confirms with the dimensions. Send a new
+one any time to replace it — no config edit, no restart, no rebuild.
 
-If your logo has **no transparency** — an emblem exported on a solid black square, say — it
-would land on the video as a black box. Set `WATERMARK_CHROMA_KEY=0x000000` (or whatever the
-background colour is) and that backdrop gets knocked out at render time.
+Send it as a **file**, not a photo: Telegram re-encodes photos to JPEG, which throws away
+transparency. The bot warns you if you do it the lossy way.
+
+If the image has **no transparency** — an emblem exported on a solid black square, say — it
+would land on the video as a black box. The bot detects that and switches on
+`WATERMARK_CHROMA_KEY=0x000000` to knock the backdrop out. If the backdrop isn't black, set
+that variable to whatever colour it is.
+
+The file-on-disk route still works: put a transparent PNG at `assets/watermark.png` and set
+`WATERMARK_MODE=logo`. That folder is mounted into the container.
 
 ---
 
@@ -252,6 +258,6 @@ tells you it went out unwatermarked rather than pretending it worked.
 | `scripts/doctor.js` | Pre-flight check |
 
 ```bash
-npm test    # 107 tests; the ffmpeg ones build real media and run the real filter graphs
+npm test    # 117 tests; the ffmpeg ones build real media and run the real filter graphs
 npm run doctor
 ```

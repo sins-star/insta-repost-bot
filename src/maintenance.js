@@ -204,13 +204,17 @@ export function startMaintenance(config, { exclusive = (fn) => fn() } = {}) {
 export async function selfCheck(config, bot) {
   const problems = [];
 
-  try {
-    await bot.api.getChat(config.channelId);
-  } catch (err) {
-    problems.push(
-      `Cannot see the channel ${config.channelId} — ${err.description || err.message}. ` +
-        'Add the bot to the channel as an admin with "Post messages".',
-    );
+  // No channel yet is a normal state on a fresh install, not a fault: the bot
+  // adopts one the moment it is added to it as an admin.
+  if (config.channelId) {
+    try {
+      await bot.api.getChat(config.channelId);
+    } catch (err) {
+      problems.push(
+        `Cannot see the channel ${config.channelId} — ${err.description || err.message}. ` +
+          'Add the bot to the channel as an admin with "Post messages".',
+      );
+    }
   }
 
   try {

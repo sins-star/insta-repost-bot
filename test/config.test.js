@@ -17,11 +17,19 @@ test('a minimal valid environment loads', () => {
   assert.equal(config.mode, 'polling');
 });
 
-test('each required variable is named when missing', () => {
-  for (const key of ['BOT_TOKEN', 'CHANNEL_ID', 'ADMIN_IDS']) {
+test('the token is the only thing that must be set', () => {
+  const env = { ...valid };
+  delete env.BOT_TOKEN;
+  assert.throws(() => loadConfig(env), /BOT_TOKEN/, 'BOT_TOKEN should be reported by name');
+});
+
+test('channel and admins may be left for the bot to discover', () => {
+  // Both are learned at runtime — the owner by /claim, the channel by being
+  // added to one — so neither is required up front.
+  for (const key of ['CHANNEL_ID', 'ADMIN_IDS']) {
     const env = { ...valid };
     delete env[key];
-    assert.throws(() => loadConfig(env), new RegExp(key), `${key} should be reported by name`);
+    assert.doesNotThrow(() => loadConfig(env), `${key} should be optional`);
   }
 });
 

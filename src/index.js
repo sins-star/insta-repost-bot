@@ -12,6 +12,7 @@ import { applyWatermark, ensureUnderLimit } from './watermark.js';
 import { postToChannel, deletePost } from './poster.js';
 import { Queue } from './queue.js';
 import { PostStore } from './store.js';
+import { RuntimeState } from './runtime.js';
 import { run } from './media.js';
 import {
   sweepTemp,
@@ -72,11 +73,32 @@ async function main() {
 
   if (config.ytdlpAutoUpdate) await updateDownloader(config);
 
+  if (config.watermark.defaultedToNone) {
+    log.warn(
+      'no watermark configured yet — send the bot a logo as a file, or set ' +
+        'WATERMARK_TEXT. Posts go out unwatermarked until then.',
+    );
+  }
+
   if (config.cover.logoMissing) {
     log.warn(
       `cover: ${config.watermark.logoPath} not found — covering an existing watermark ` +
         'will blur it out but not stamp the logo. Add the file and restart to enable that.',
     );
+  }
+
+  // Anything the bot worked out for itself on a previous run — owner, channel,
+  // logo — is folded into config here, so every other file keeps reading plain
+  // config and knows nothing about how it got there.
+  const runtime = new RuntimeState(config.dataDir);
+  await runtime.load();
+  if (!config.adminIds.length && runtime.adminIds.length) config.adminIds = runtime.adminIds;
+  if (!config.channelId && runtime.channelId) config.channelId = runtime.channelId;
+  if (runtime.logoPath) {
+    config.watermark.logoPath = runtime.logoPath;
+    config.cover.useLogo = true;
+    config.cover.logoMissing = false;
+    if (config.watermark.mode === 'text') config.watermark.mode = 'logo';
   }
 
   const store = new PostStore(config.dataDir);
@@ -105,6 +127,86 @@ async function main() {
     ),
   );
 
+  /**
+   * Ownership claim.
+   *
+   * Registered before the admin gate, because by definition nobody is an admin
+   * when this runs. Three things keep it from being a way in: it only works
+   * while the bot has no owner at all, only inside a window after startup, and
+   * the first claim is final.
+   */
+  bot.command('claim', async (ctx) => {
+    const userId = ctx.from?.id;
+    if (!userId) return;
+
+    if (config.adminIds.length) {
+      const alreadyYours = config.adminIds.includes(userId);
+      await ctx.reply(
+        alreadyYours
+          ? 'You already own this bot. Paste an Instagram link to get going.'
+          : 'This bot already has an owner.',
+      );
+      return;
+    }
+    if (!config.allowClaim) {
+      await ctx.reply('Claiming is switched off. Set ADMIN_IDS and restart.');
+      return;
+    }
+
+    const openForMs = config.claimWindowMin * 60 * 1000;
+    if (Date.now() - startedAt > openForMs) {
+      await ctx.reply(
+        `The claim window closed ${config.claimWindowMin} minutes after startup. ` +
+          'Restart the bot and send /claim again within that time.',
+      );
+      log.warn(`refused a late claim from ${userId}`);
+      return;
+    }
+
+    await runtime.claim(userId);
+    config.adminIds = runtime.adminIds;
+    await ctx.reply(
+      '✅ You own this bot now.\n\n' +
+        'Next: add me to your channel as an admin with “Post messages” — I will ' +
+        'notice and start posting there.\n\n' +
+        'Then send me your logo as a FILE and I will use it as the watermark.',
+    );
+  });
+
+  /**
+   * Learn the channel by being added to it.
+   *
+   * Telegram tells the bot when its own membership changes, and that update
+   * carries the chat id — the exact number someone would otherwise have to go
+   * and look up. Registered ahead of the admin gate because this can legitimately
+   * arrive before anyone has claimed the bot.
+   */
+  bot.on('my_chat_member', async (ctx) => {
+    const update = ctx.myChatMember;
+    const chat = update.chat;
+    const status = update.new_chat_member?.status;
+
+    if (chat.type !== 'channel' || status !== 'administrator') return;
+    const name = chat.title || chat.username || chat.id;
+
+    if (config.channelId && String(config.channelId) !== String(chat.id)) {
+      log.warn(`added to "${name}" but already posting to ${config.channelId} — ignoring`);
+      return;
+    }
+    if (config.channelId) return;
+
+    await runtime.setChannel(chat.id);
+    config.channelId = chat.id;
+    log.info(`adopted channel "${name}" (${chat.id})`);
+
+    const message =
+      `✅ I can post to <b>${name}</b> now.\n\n` +
+      'Paste an Instagram link and it goes straight there.';
+    for (const adminId of config.adminIds) {
+      await ctx.api.sendMessage(adminId, message, { parse_mode: 'HTML' }).catch(() => {});
+    }
+  });
+
   bot.use(async (ctx, next) => {
     const userId = ctx.from?.id;
     if (userId && config.adminIds.includes(userId)) return next();
@@ -114,7 +216,9 @@ async function main() {
     }
     if (ctx.message) {
       await ctx.reply(
-        `Not authorised. Your id is ${userId} — it needs to be in ADMIN_IDS.`,
+        config.adminIds.length
+          ? `Not authorised. Your id is ${userId} — it needs to be in ADMIN_IDS.`
+          : 'This bot has no owner yet. Send /claim to take it.',
       );
     }
   });
@@ -123,6 +227,11 @@ async function main() {
     '<b>Instagram → channel reposter</b>\n\n' +
     'Paste an Instagram reel or post link and I will download it, watermark it, ' +
     'and post it to the channel. Multiple links in one message all get queued.\n\n' +
+    '<b>Setting me up</b>\n' +
+    '1. /claim — become my owner\n' +
+    '2. Add me to your channel as an admin with “Post messages”\n' +
+    '3. Send me your logo <i>as a file</i> and I will use it as the watermark\n\n' +
+    'Send a new logo any time to replace it.\n\n' +
     '/status — queue, uptime and settings\n' +
     '/whoami — your Telegram id\n' +
     '/help — this message';
@@ -140,7 +249,7 @@ async function main() {
     return ctx.reply(
       [
         `Up ${uptime()} · mode ${config.mode}`,
-        `Channel: ${config.channelId}`,
+        `Channel: ${config.channelId || 'not set — add me to one as admin'}`,
         `Queue: ${queue.size} waiting · ${queue.completed} posted · ${queue.failed} failed`,
         `Watermark: ${detail}`,
         `Cover existing: ${
@@ -151,6 +260,105 @@ async function main() {
         `Cookies: ${config.cookiesFile ? 'configured' : 'none'}`,
       ].join('\n'),
     );
+  });
+
+  /**
+   * Set the watermark logo by sending the image to the bot.
+   *
+   * Accepts a document (keeps transparency) or a photo (Telegram re-encodes
+   * photos to JPEG and flattens the alpha channel, so that path warns). The file
+   * lands in the data volume, which survives restarts and image rebuilds.
+   */
+  async function receiveLogo(ctx, { fileId, asPhoto, fileName }) {
+    const status = await ctx.reply('⬇️ Saving your logo…');
+    try {
+      const file = await ctx.api.getFile(fileId);
+      if ((file.file_size || 0) > 10 * 1024 * 1024) {
+        throw new Error('that file is over 10MB — a watermark should be a few hundred KB');
+      }
+
+      // Downloaded by hand rather than with file.download(), which only exists
+      // if the @grammyjs/files plugin is installed. This is two lines and one
+      // fewer dependency.
+      const base = (config.apiRoot || 'https://api.telegram.org').replace(/\/+$/, '');
+      const res = await fetch(`${base}/file/bot${config.botToken}/${file.file_path}`);
+      if (!res.ok) throw new Error(`Telegram returned ${res.status} for that file`);
+
+      const dest = path.join(config.dataDir, 'watermark.png');
+      await fs.writeFile(dest, Buffer.from(await res.arrayBuffer()));
+
+      const info = await probeImage(dest);
+      await runtime.setLogo(dest);
+      config.watermark.logoPath = dest;
+      config.cover.useLogo = true;
+      config.cover.logoMissing = false;
+      if (config.watermark.mode === 'text') config.watermark.mode = 'logo';
+
+      const notes = [];
+      if (asPhoto) {
+        notes.push(
+          '⚠️ Sent as a photo, so Telegram flattened it to JPEG and any ' +
+            'transparency is gone. Send it again as a <b>file</b> to keep it.',
+        );
+      }
+      if (info && !info.hasAlpha) {
+        notes.push(
+          'This image has no transparent background, so I have set ' +
+            '<code>WATERMARK_CHROMA_KEY</code> to knock out its backdrop. If the ' +
+            'backdrop is not black, tell me its colour.',
+        );
+        if (!config.watermark.chromaKey) config.watermark.chromaKey = '0x000000';
+      }
+
+      await ctx.api.editMessageText(
+        ctx.chat.id,
+        status.message_id,
+        `✅ Logo set${info ? ` — ${info.width}×${info.height}` : ''}. ` +
+          `It will appear in the ${config.watermark.position} corner of everything ` +
+          `from now on.${notes.length ? `\n\n${notes.join('\n\n')}` : ''}`,
+        { parse_mode: 'HTML' },
+      );
+      log.info(`logo updated from ${fileName || 'chat'}`);
+    } catch (err) {
+      log.error('could not save the logo —', err.message);
+      await setStatus(ctx, status.message_id, `🚫 Could not save that: ${err.message}`);
+    }
+  }
+
+  async function probeImage(filePath) {
+    try {
+      const { stdout } = await run(
+        config.ffprobePath,
+        ['-v', 'error', '-print_format', 'json', '-show_streams', filePath],
+        { timeoutMs: 30000 },
+      );
+      const stream = (JSON.parse(stdout).streams || [])[0] || {};
+      return {
+        width: Number(stream.width) || 0,
+        height: Number(stream.height) || 0,
+        // yuva/rgba/argb pixel formats are the ones carrying transparency.
+        hasAlpha: /a$|^(yuva|rgba|argb|bgra|abgr|pal8)/.test(stream.pix_fmt || ''),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  bot.on('message:document', async (ctx, next) => {
+    const doc = ctx.message.document;
+    if (!/^image\//.test(doc.mime_type || '') && !/\.(png|jpe?g|webp)$/i.test(doc.file_name || '')) {
+      return next();
+    }
+    await receiveLogo(ctx, { fileId: doc.file_id, asPhoto: false, fileName: doc.file_name });
+  });
+
+  bot.on('message:photo', async (ctx, next) => {
+    // A forwarded Instagram post arrives as a photo with the link in its
+    // caption. That is a repost request, not a new logo.
+    if (findInstagramUrls(ctx.message.caption || '').length) return next();
+    // The last entry is the largest rendition Telegram kept.
+    const photo = ctx.message.photo[ctx.message.photo.length - 1];
+    await receiveLogo(ctx, { fileId: photo.file_id, asPhoto: true });
   });
 
   bot.on('callback_query:data', async (ctx) => {
@@ -182,6 +390,13 @@ async function main() {
   });
 
   async function runJob(ctx, url, statusId) {
+    if (!config.channelId) {
+      throw new Error(
+        'I have no channel to post to yet. Add me to your channel as an admin ' +
+          'with “Post messages” and I will pick it up automatically.',
+      );
+    }
+
     // A full disk turns every download into a confusing failure. Try to fix it
     // first — the usual cause is debris from a job killed mid-encode — and only
     // then refuse, with a message that says what is actually wrong.
@@ -441,6 +656,7 @@ async function main() {
   bot.api
     .setMyCommands([
       { command: 'help', description: 'How to use this bot' },
+      { command: 'claim', description: 'Become the owner of this bot' },
       { command: 'status', description: 'Queue, uptime and settings' },
       { command: 'whoami', description: 'Show my Telegram id' },
     ])
