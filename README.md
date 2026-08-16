@@ -126,15 +126,20 @@ which is when they matter.
 
 ## Auto-deploy: never open Google Cloud again
 
-In Cloud Shell, four keystrokes:
+One paste, into any shell, from any directory:
 
 ```bash
-./go
+bash <(curl -sL https://raw.githubusercontent.com/sins-star/insta-repost-bot/main/b)
 ```
 
-That pulls the latest code, sets up auto-deploy the first time it runs, and deploys.
-Short on purpose: Cloud Shell on a phone will not paste, so every character has to be
-typed by hand.
+That clones the repo if it isn't there, updates it if it is, sets up auto-deploy the
+first time, and deploys. It exists because `./go` assumes you are already standing
+inside a clone — and that assumption is what kept breaking. A Cloud Shell that timed
+out and reconnected drops you in `$HOME` with nothing checked out; the Google Cloud
+mobile app opens a shell that never had a clone at all. `cd`-ing to the right place
+first is one more thing to type correctly at 1am on a phone.
+
+If you *are* already inside the clone, `./go` does the same job in four keystrokes.
 
 From then on **every push to `main` deploys itself** — GitHub runs the tests, then
 deploys to Cloud Run. Nothing to open, no commands, no terminal.
