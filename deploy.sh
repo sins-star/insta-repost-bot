@@ -33,6 +33,29 @@ if ! printf '%s' "$BOT_TOKEN" | grep -Eq '^[0-9]{5,}:[A-Za-z0-9_-]{20,}$'; then
   exit 1
 fi
 
+# ── credentials ──────────────────────────────────────────────────────────────
+# A Cloud Shell session that reconnected after idling can come back with no
+# active account. Every later step then fails for a reason that looks like
+# something else entirely — the services call reports it as a billing problem.
+ACTIVE=$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null | head -1)
+if [ -z "$ACTIVE" ]; then
+  KNOWN=$(gcloud auth list --format='value(account)' 2>/dev/null | head -1)
+  echo ""
+  echo "✖ This shell has no active Google account — it is not a billing problem."
+  if [ -n "$KNOWN" ]; then
+    echo "  Fix it with one command, then re-run ./deploy.sh:"
+    echo ""
+    echo "      gcloud config set account ${KNOWN}"
+  else
+    echo "  Log in again, then re-run ./deploy.sh:"
+    echo ""
+    echo "      gcloud auth login"
+  fi
+  echo ""
+  exit 1
+fi
+echo "Account: $ACTIVE"
+
 # ── project ──────────────────────────────────────────────────────────────────
 PROJECT_ID=$(gcloud config get-value project 2>/dev/null || true)
 if [ -z "$PROJECT_ID" ] || [ "$PROJECT_ID" = "(unset)" ]; then
@@ -57,8 +80,10 @@ echo "Project: $PROJECT_ID"
 echo "Enabling services (a minute, safe to re-run)…"
 if ! gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
     artifactregistry.googleapis.com storage.googleapis.com --quiet; then
-  echo "✖ Could not enable services — usually this means billing isn't active yet."
-  echo "  Activate the free trial at console.cloud.google.com/billing, then re-run."
+  echo "✖ Could not enable services. The usual causes, in order of likelihood:"
+  echo "    • billing not active — activate at console.cloud.google.com/billing"
+  echo "    • the account lacks rights on this project"
+  echo "  Then re-run ./deploy.sh"
   exit 1
 fi
 
