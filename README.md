@@ -100,7 +100,13 @@ Two things about Cloud Run break a naive deployment, and `SERVERLESS=true` exist
    bucket at `/app/data` (Cloud Run volume mounts, gen2) so the owner claim, destinations,
    logo and delete-buttons survive. Temp video also counts against RAM — give it 2GiB.
 
-Deploy shape that works:
+One command does all of it — in Cloud Shell, from the repo root:
+
+```bash
+./deploy.sh    # asks for your bot token, works everything else out itself
+```
+
+Which expands to:
 
 ```bash
 gcloud run deploy repost-bot --source . --region us-west1 --allow-unauthenticated \
