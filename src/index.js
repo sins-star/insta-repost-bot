@@ -13,6 +13,7 @@ import { broadcast, deletePost } from './poster.js';
 import { Queue } from './queue.js';
 import { PostStore } from './store.js';
 import { RuntimeState } from './runtime.js';
+import { createDispatcher } from './dispatch.js';
 import { run } from './media.js';
 import {
   sweepTemp,
@@ -71,7 +72,11 @@ async function main() {
   // first download so a full disk is fixed rather than merely reported.
   await sweepTemp(config).catch(() => {});
 
-  if (config.ytdlpAutoUpdate) await updateDownloader(config);
+  // On serverless the filesystem — and any update written to it — evaporates
+  // at scale-to-zero, and a multi-minute pip run inside a cold start would eat
+  // the whole "first link after a quiet spell" budget. Updates there happen on
+  // download failure instead, where they actually persist for the retry.
+  if (config.ytdlpAutoUpdate && !config.serverless) await updateDownloader(config);
 
   if (config.watermark.defaultedToNone) {
     log.warn(
@@ -624,7 +629,18 @@ async function main() {
     // update — which posts the reel to the channel twice.
     for (const url of urls) {
       const statusId = await announce(ctx);
-      if (statusId) {
+      if (!statusId) continue;
+      if (dispatcher) {
+        // Awaiting this is safe AND required: it resolves on the first byte
+        // from /work (milliseconds), which proves the job's request is live
+        // before we hand Telegram its response and lose the CPU.
+        try {
+          await dispatcher.dispatch({ chatId: ctx.chat.id, fromId: ctx.from?.id, statusId, url });
+        } catch (err) {
+          log.error('could not dispatch job —', err.message);
+          await setStatus(ctx, statusId, `🚫 Could not start the job: ${err.message}`);
+        }
+      } else {
         handleUrl(ctx, url, statusId).catch((err) =>
           log.error('unhandled job failure —', err),
         );
@@ -632,6 +648,26 @@ async function main() {
     }
   });
 
+
+  /**
+   * Serverless job runner. The payload carries just enough to rebuild the
+   * pieces of a grammY context the job pipeline actually touches — api calls,
+   * the admin chat id, and who asked.
+   */
+  const dispatcher = config.serverless
+    ? createDispatcher({
+        baseUrl: config.webhookUrl,
+        runJob: async ({ chatId, fromId, statusId, url }) => {
+          const ctxLike = {
+            api: bot.api,
+            chat: { id: chatId },
+            from: fromId ? { id: fromId } : undefined,
+            reply: (text, extra) => bot.api.sendMessage(chatId, text, extra),
+          };
+          await handleUrl(ctxLike, url, statusId);
+        },
+      })
+    : null;
 
   const webhookPath = `/telegram/${crypto
     .createHash('sha256')
@@ -646,6 +682,13 @@ async function main() {
       : null;
 
   const server = http.createServer((req, res) => {
+    if (dispatcher && req.method === 'POST' && req.url === dispatcher.workPath) {
+      dispatcher.handle(req, res).catch((err) => {
+        log.error('work handler —', err.message);
+        res.destroy();
+      });
+      return;
+    }
     if (handleWebhook && req.method === 'POST' && req.url === webhookPath) {
       handleWebhook(req, res).catch((err) => log.error('webhook handler —', err.message));
       return;
@@ -736,7 +779,7 @@ async function main() {
   };
   reportProblems().catch((err) => log.warn('self-check failed \u2014', err.message));
 
-  const stopMaintenance = startMaintenance(config, {
+  const stopMaintenance = startMaintenance({ ...config, ytdlpAutoUpdate: config.ytdlpAutoUpdate && !config.serverless }, {
     // Run the periodic downloader update THROUGH the job queue. pip's upgrade
     // uninstalls before it reinstalls, and yt-dlp imports its extractors
     // lazily — so replacing it underneath a download in progress surfaces as a

@@ -1,7 +1,16 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { run, CommandError } from './media.js';
+import { updateDownloader } from './maintenance.js';
 import { log } from './logger.js';
+
+/**
+ * Failure-triggered updates are rate-limited across the whole process: a
+ * plain Instagram rate-limit error must not turn every pasted link into a
+ * pip run. Six hours is often enough for yt-dlp to ship a fix.
+ */
+let lastFailureUpdateAt = 0;
+const FAILURE_UPDATE_MIN_GAP_MS = 6 * 60 * 60 * 1000;
 
 const URL_PATTERN = /https?:\/\/(?:www\.)?(?:instagram\.com|instagr\.am)\/[^\s<>"')]+/gi;
 
@@ -222,21 +231,61 @@ async function collect(workDir) {
   return { items, caption, uploader };
 }
 
+/** Leftovers from a failed attempt would confuse the retry and the collector. */
+async function resetDir(workDir) {
+  for (const name of await fs.readdir(workDir)) {
+    await fs.rm(path.join(workDir, name), { recursive: true, force: true });
+  }
+}
+
 export async function download(url, workDir, config) {
-  let primaryError;
+  let primaryError = null;
   try {
     await runYtDlp(url, workDir, config);
   } catch (err) {
     primaryError = err;
-    const stderr = err instanceof CommandError ? err.stderr : '';
-    log.error('yt-dlp failed for', url, '—', stderr || err.message);
+    log.error(
+      'yt-dlp failed for',
+      url,
+      '—',
+      (err instanceof CommandError && err.stderr) || err.message,
+    );
+  }
+
+  // A fresh Instagram breakage is usually fixed upstream within days, so a
+  // failure is the best possible moment to pull the fix and try again — and on
+  // serverless it is the ONLY update that works, since the filesystem (and any
+  // boot-time update with it) evaporates whenever the service scales to zero.
+  if (
+    primaryError &&
+    config.updateOnFailure &&
+    Date.now() - lastFailureUpdateAt > FAILURE_UPDATE_MIN_GAP_MS
+  ) {
+    lastFailureUpdateAt = Date.now();
+    log.info('download failed — updating the downloader and retrying once…');
+    const { updated } = await updateDownloader(config);
+    if (updated) {
+      await resetDir(workDir).catch(() => {});
+      try {
+        await runYtDlp(url, workDir, config);
+        primaryError = null;
+        log.info('the updated yt-dlp succeeded');
+      } catch (err) {
+        primaryError = err;
+      }
+    }
+  }
+
+  if (primaryError) {
+    const stderr = primaryError instanceof CommandError ? primaryError.stderr : '';
 
     if (!config.fallbackEnabled) {
-      const { reason, hint } = explainFailure(stderr, err.message);
-      throw new DownloadError(reason, { hint, cause: err });
+      const { reason, hint } = explainFailure(stderr, primaryError.message);
+      throw new DownloadError(reason, { hint, cause: primaryError });
     }
 
     log.info('trying gallery-dl as a fallback…');
+    await resetDir(workDir).catch(() => {});
     try {
       await runGalleryDl(url, workDir, config);
       log.info('gallery-dl succeeded where yt-dlp failed');
@@ -245,8 +294,8 @@ export async function download(url, workDir, config) {
       log.error('gallery-dl also failed —', fallbackStderr || fallbackErr.message);
       // Report the primary tool's diagnosis: it is the better-maintained
       // extractor and its messages are the ones the hints are written for.
-      const { reason, hint } = explainFailure(stderr, err.message);
-      throw new DownloadError(reason, { hint, cause: err });
+      const { reason, hint } = explainFailure(stderr, primaryError.message);
+      throw new DownloadError(reason, { hint, cause: primaryError });
     }
   }
 

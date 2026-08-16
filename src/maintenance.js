@@ -237,6 +237,20 @@ export async function selfCheck(config, bot, destinations = []) {
     }
   }
 
+  // The data dir holds the claim, the destinations and the logo. On a broken
+  // volume mount every write fails QUIETLY (persistence errors are non-fatal
+  // by design), so the one loud moment to catch it is here.
+  try {
+    const probe = path.join(config.dataDir, '.write-test');
+    await fs.writeFile(probe, 'ok');
+    await fs.rm(probe, { force: true });
+  } catch (err) {
+    problems.push(
+      `Cannot write to ${config.dataDir} (${err.message}) — the owner claim, ` +
+        'destinations and logo will not survive a restart.',
+    );
+  }
+
   const free = await freeSpaceMb(config.tmpDir);
   if (free !== null && free < config.minFreeSpaceMb) {
     problems.push(`Only ${free}MB of disk free — downloads may fail.`);

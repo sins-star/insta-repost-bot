@@ -75,7 +75,7 @@ stays on will do.
 | **A machine you already own** | free | Easiest by far. Spare laptop, old PC, Raspberry Pi, home server. `docker compose up -d`. Only posts while that machine is on. |
 | **Oracle Cloud Always Free** | free forever | The only genuinely free always-on VM left. 2 ARM cores / 12GB. Needs a card for ID verification, and setup is a real sit-down-at-a-computer job, not a phone task. See the caveat below. |
 | **Any small VPS** | ~$4/mo | Hetzner, Vultr, DigitalOcean. Zero drama, works the first time. |
-| **Cloud Run / Render** | free tier | Needs `MODE=webhook`. Both sleep when idle, so the first link after a quiet spell takes ~1 minute. Cloud Run's filesystem is *in memory* — give it 2GB or video downloads will hit the memory ceiling. |
+| **Google Cloud Run** | free tier | Fully supported via `SERVERLESS=true` — see below. Sleeps when idle, so the first link after a quiet spell takes ~1 minute. |
 
 **The Oracle caveat, because it will bite otherwise:** Oracle reclaims idle Always Free ARM
 instances when CPU, network *and* memory all sit below 20% across a 7-day window. A bot that
@@ -84,7 +84,37 @@ other small workload on the box avoids it — but don't put this somewhere and a
 permanent without watching for that email.
 
 Fly.io, Railway and Hugging Face Spaces no longer have a free tier that fits this. Render's
-free plan has no background workers, only web services, which is why it needs webhook mode.
+free plan has no background workers, so it cannot run this bot's downloads even in webhook mode.
+
+### Cloud Run specifically
+
+Two things about Cloud Run break a naive deployment, and `SERVERLESS=true` exists for both:
+
+1. **CPU freezes the moment an HTTP response is sent** (on request-based billing, which is
+   the free kind). The bot answers Telegram *before* downloading — answering late makes
+   Telegram redeliver and double-post — so the download would freeze at 0%. With
+   `SERVERLESS=true`, each job runs inside a self-addressed `/work` request that stays open
+   until the job finishes; an open request means allocated CPU. The `/work` endpoint takes a
+   token that's random per process and never leaves it.
+2. **The filesystem is in-memory and vanishes at scale-to-zero.** Mount a Cloud Storage
+   bucket at `/app/data` (Cloud Run volume mounts, gen2) so the owner claim, destinations,
+   logo and delete-buttons survive. Temp video also counts against RAM — give it 2GiB.
+
+Deploy shape that works:
+
+```bash
+gcloud run deploy repost-bot --source . --region us-west1 --allow-unauthenticated \
+  --memory 2Gi --cpu 2 --max-instances 1 --timeout 1800 --execution-environment gen2 \
+  --add-volume name=data,type=cloud-storage,bucket=YOUR_BUCKET \
+  --add-volume-mount volume=data,mount-path=/app/data \
+  --set-env-vars SERVERLESS=true,WEBHOOK_URL=https://...,WEBHOOK_SECRET=...,BOT_TOKEN=...
+```
+
+`--max-instances 1` is load-bearing: the `/work` self-call must land on the process that
+minted its token, and two instances would race the data files. `--timeout 1800` is the
+ceiling on one job. Boot-time yt-dlp updates are skipped on serverless (they'd evaporate
+anyway and would eat the cold-start budget) — updates happen on download failure instead,
+which is when they matter.
 
 ---
 
@@ -266,6 +296,6 @@ tells you it went out unwatermarked rather than pretending it worked.
 | `scripts/doctor.js` | Pre-flight check |
 
 ```bash
-npm test    # 124 tests; the ffmpeg ones build real media and run the real filter graphs
+npm test    # 128 tests; the ffmpeg ones build real media and run the real filter graphs
 npm run doctor
 ```

@@ -124,6 +124,12 @@ export function loadConfig(source = process.env) {
       claimWindowMin: num('CLAIM_WINDOW_MIN', 60, { min: 1, max: 10080, integer: true }),
 
       mode,
+      // Serverless platforms (Cloud Run on request-based billing) freeze the
+      // CPU once an HTTP response is sent, so background work never finishes.
+      // This routes each job through a self-addressed /work request that stays
+      // open for the job's duration — an open request means allocated CPU.
+      // Implies webhook mode.
+      serverless: bool('SERVERLESS', false),
       // Point this at a self-hosted tdlib/telegram-bot-api server to lift the
       // 50MB upload ceiling to 2GB. Empty means Telegram's own API.
       apiRoot: str('TELEGRAM_API_ROOT', ''),
@@ -173,6 +179,13 @@ export function loadConfig(source = process.env) {
       // container if something pulls it. This is the difference between the bot
       // healing itself overnight and someone having to go and fix it.
       ytdlpAutoUpdate: bool('YTDLP_AUTO_UPDATE', true),
+      // Also try an update WHEN A DOWNLOAD FAILS, then retry once. This is the
+      // only self-update that helps on serverless, where the filesystem (and
+      // any boot-time update) evaporates at scale-to-zero — and it means a
+      // fresh Instagram breakage can heal mid-conversation instead of at the
+      // next timer tick. Rate-limited to once per 6h so an ordinary rate-limit
+      // error cannot spam pip.
+      updateOnFailure: bool('YTDLP_UPDATE_ON_FAILURE', true),
       // Capped below 596h on purpose: setInterval silently reinterprets any
       // delay above 2^31-1 ms as 1ms, which would spawn pip in a tight loop.
       updateIntervalHours: num('YTDLP_UPDATE_INTERVAL_HOURS', 24, { min: 1, max: 500 }),
@@ -210,6 +223,9 @@ export function loadConfig(source = process.env) {
           'Either set ADMIN_IDS, or leave ALLOW_CLAIM on and send /claim to the bot.',
       );
     }
+    // Serverless only works via webhooks — polling needs an always-on process,
+    // which is the exact thing serverless is not.
+    if (config.serverless) config.mode = 'webhook';
     if (config.mode === 'webhook' && !config.webhookUrl) {
       throw new ConfigError('MODE=webhook requires WEBHOOK_URL (the public https URL of this bot)');
     }

@@ -12,7 +12,7 @@
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
     "test": "node --test test/*.test.js",
-    "check": "node --check src/runtime.js && node --check src/maintenance.js && node --check src/detect.js && node --check src/index.js && node --check src/config.js && node --check src/instagram.js && node --check src/watermark.js && node --check src/poster.js && node --check src/queue.js && node --check src/store.js && node --check src/media.js && node --check src/logger.js",
+    "check": "node --check src/dispatch.js && node --check src/runtime.js && node --check src/maintenance.js && node --check src/detect.js && node --check src/index.js && node --check src/config.js && node --check src/instagram.js && node --check src/watermark.js && node --check src/poster.js && node --check src/queue.js && node --check src/store.js && node --check src/media.js && node --check src/logger.js",
     "doctor": "node scripts/doctor.js"
   },
   "dependencies": {
