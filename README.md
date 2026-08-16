@@ -126,11 +126,23 @@ which is when they matter.
 
 ## Auto-deploy: never open Google Cloud again
 
-One paste, into any shell, from any directory:
+One line, into any shell, from any directory:
 
 ```bash
 bash <(curl -sL https://raw.githubusercontent.com/sins-star/insta-repost-bot/main/b)
 ```
+
+**On a phone, type this instead** — 36 characters, and every symbol in it is on the
+first symbol layer of the iOS keyboard, so there is no hunting through `#+=`:
+
+```bash
+curl -fsLo b tinyurl.com/sinsgo;bash b
+```
+
+`tinyurl.com/sinsgo` is a short link to that same `b` in this repo. It exists because
+iOS Safari cannot paste into Cloud Shell at all — the terminal is a canvas, not a text
+field, so the paste menu never appears and the only way in is by hand. Length is
+therefore a real constraint, not a nicety.
 
 That clones the repo if it isn't there, updates it if it is, sets up auto-deploy the
 first time, and deploys. It exists because `./go` assumes you are already standing
