@@ -916,6 +916,17 @@ async function main() {
         })
       : null;
 
+  // What this build can actually do, served on /health.
+  //
+  // Exists because "the merge succeeded" is not evidence the code is live, and
+  // proving otherwise has repeatedly meant opening a console that is hostile on
+  // a phone. Anyone can now curl /health and see whether a feature shipped: if
+  // its name is absent, the running container predates it.
+  //
+  // Add a name here in the same commit that adds the capability, and never
+  // before it works — a flag that lies is worse than no flag.
+  const FEATURES = ['strip-forward', 'clean-captions', 'send-button', 'cover-watermark'];
+
   const server = http.createServer((req, res) => {
     if (dispatcher && req.method === 'POST' && req.url === dispatcher.workPath) {
       dispatcher.handle(req, res).catch((err) => {
@@ -938,6 +949,7 @@ async function main() {
           queued: queue.size,
           posted: queue.completed,
           failed: queue.failed,
+          features: FEATURES,
         }),
       );
       return;
