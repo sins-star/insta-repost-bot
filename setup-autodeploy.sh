@@ -51,7 +51,16 @@ if [ -z "$PROJECT_ID" ] || [ "$PROJECT_ID" = "(unset)" ]; then
     PROJECT_ID="${PROJECTS[0]}"
     gcloud config set project "$PROJECT_ID" --quiet >/dev/null
   elif [ "${#PROJECTS[@]}" -eq 0 ]; then
-    echo "✖ No Google Cloud project is visible to this account."
+    # Almost always the wrong Google account rather than a missing project:
+    # Cloud Shell runs as whoever the browser is signed in as, and a Workspace
+    # address and a personal Gmail are entirely separate worlds with separate
+    # home directories. Say so, because "no project" sounds like the project is
+    # gone.
+    echo "✖ No Google Cloud project is visible to ${ACTIVE}."
+    echo ""
+    echo "  This usually means the browser is signed in as the wrong account."
+    echo "  Switch with the avatar at the top right of the console, reopen"
+    echo "  https://shell.cloud.google.com, and run the install line again."
     exit 1
   else
     echo "More than one project — pick the one to deploy into:"
